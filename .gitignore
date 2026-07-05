@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Model weights (large files)
+src/models/weights/
+
+# User memory / personal data
+data/
+
+# Agent workspace (temporary execution artifacts)
+agent_workspace/
+
+# OS-specific files
+.DS_Store
+
+# IDE / Project local configurations
+.vscode/
+.idea/
+.gemini/
+.agents/
+.claude/
+
+# Editor / Extension packages
+*.vsix
+
