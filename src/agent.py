@@ -1,40 +1,19 @@
-"""The local model wrapper: drives the tool-calling loop against the gguf
-model via llama.cpp. All prompt text (persona, tool-output framing, error
-messages) lives in src/prompts/ - this module only orchestrates."""
+"""The agent orchestration layer: drives the ReAct tool-calling loop against
+whichever LLMProvider the active model card resolves to (see src/llm/) —
+local llama.cpp or an OpenAI-compatible API. All prompt text (persona,
+tool-output framing, error messages) lives in src/prompts/ - this module only
+orchestrates, and never talks to llama_cpp or an HTTP client directly."""
 
-import ctypes
 import json
-import os
 import re
-import llama_cpp
 
 from src.memory import add_lesson
-from llama_cpp import Llama
-from llama_cpp.llama_chat_format import MTMDChatHandler
+from src.llm import build_provider
 from src.tools.registry import registry
 from src.prompts import templates
 from src.vision import IMAGE_SENTINEL
 
-# llama.cpp's mtmd (vision) library logs through its own native callbacks —
-# separate from the main llama log — and by default dumps the entire rendered
-# prompt (add_text: ...) and clip loader spam straight into the chat output.
-# Install a no-op callback on every native logger. The callback object must
-# stay referenced at module level or ctypes garbage-collects it and the next
-# native log call crashes.
-_NULL_LOG_CALLBACK = llama_cpp.llama_log_callback(lambda level, text, user_data: None)
-
-
-def _silence_native_logs():
-    llama_cpp.llama_log_set(_NULL_LOG_CALLBACK, ctypes.c_void_p(0))
-    try:
-        import llama_cpp.mtmd_cpp as mtmd_cpp
-        mtmd_cpp.mtmd_log_set(_NULL_LOG_CALLBACK, ctypes.c_void_p(0))
-        mtmd_cpp.mtmd_helper_log_set(_NULL_LOG_CALLBACK, ctypes.c_void_p(0))
-    except (ImportError, AttributeError):
-        pass  # older llama-cpp-python without mtmd log hooks
-
 _MAX_TOOL_HOPS = 4
-_VISION_CAPABILITIES = {"vision", "omni"}
 
 _TOOL_CALL_PATTERN = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 
@@ -54,31 +33,13 @@ class ToolCallError(Exception):
         self.tool_name = tool_name
 
 
-class _NoWarmupMTMDChatHandler(MTMDChatHandler):
-    """MTMDChatHandler with the mtmd dummy-image warmup disabled.
-
-    llama.cpp's Metal backend segfaults while encoding the oversized
-    (1472x1472) warmup image for Qwen3-VL projectors. Real Tuffy images are
-    capped at 1024px by src/vision.py and encode fine on GPU, so skipping
-    only the warmup keeps the whole vision path on GPU without the crash.
-    """
-
-    def _init_mtmd_context(self, llama_model):
-        original_default = self._mtmd_cpp.mtmd_context_params_default
-
-        def default_without_warmup():
-            params = original_default()
-            params.warmup = False
-            return params
-
-        self._mtmd_cpp.mtmd_context_params_default = default_without_warmup
-        try:
-            super()._init_mtmd_context(llama_model)
-        finally:
-            self._mtmd_cpp.mtmd_context_params_default = original_default
-
-
 class LocalAgent:
+    """Despite the name (kept for compatibility with callers/main.py), this
+    now drives ANY provider — local gguf via llama.cpp or a remote API model
+    — chosen by the model card's 'provider' field. The ReAct loop, tool
+    dispatch, and foreign-script guard below are provider-agnostic; only
+    src/llm/*_provider.py contains backend-specific code."""
+
     def __init__(self, model_card: dict):
         self.model_id = model_card["id"]
         self.sampling_params = model_card["sampling_params"]
@@ -90,48 +51,31 @@ class LocalAgent:
         # None, the agent stays silent about its internal steps; the caller
         # decides what a user is shown, not this module.
         self.trace_cb = None
-        if not model_card["load_params"].get("verbose"):
-            _silence_native_logs()
-        mmproj_path = model_card.get("mmproj_path")
-        mmproj_available = bool(mmproj_path) and os.path.exists(mmproj_path)
-        self.supports_vision = bool(_VISION_CAPABILITIES & set(model_card["capabilities"])) and mmproj_available
 
-        load_params = dict(model_card["load_params"])
-        if self.supports_vision:
-            # MTMDChatHandler reads the projector type from the mmproj GGUF
-            # itself, so any llama.cpp-supported vision model works without
-            # per-model handler code.
-            load_params["chat_handler"] = _NoWarmupMTMDChatHandler(
-                clip_model_path=mmproj_path,
-                verbose=bool(load_params.get("verbose")),
-                use_gpu=True,
-            )
-        self.vision_disabled_reason = None
-        if mmproj_path and not mmproj_available:
-            self.vision_disabled_reason = (
-                f"mmproj file not found at '{mmproj_path}'. Download it and place it "
-                "there to enable vision for this model."
-            )
+        self.provider = build_provider(model_card)
+        self.provider.load()
 
-        self.llm = Llama(model_path=model_card["path"], **load_params)
+    @property
+    def supports_vision(self) -> bool:
+        return self.provider.supports_vision
+
+    @property
+    def vision_disabled_reason(self):
+        return self.provider.vision_disabled_reason
 
     def unload(self):
-        """Frees the llama.cpp context and any vision (mtmd) context so their
-        backing memory (weights, KV cache, clip buffers) is released before
-        another model is loaded in its place."""
-        if self.llm is not None:
-            handler = self.llm.chat_handler
-            if handler is not None and hasattr(handler, "close"):
-                handler.close()
-            self.llm.close()
-        self.llm = None
+        """Releases whatever resources the active provider holds (local
+        model memory, or just its API credentials) before another model is
+        loaded in its place."""
+        self.provider.unload()
 
     @staticmethod
     def attach_image(user_message: dict, image_data_uri: str) -> dict:
-        """Rewrites a plain-text user message into llama.cpp's multimodal content
-        list form, appending an image alongside the existing text. image_data_uri
-        is a data: URI (base64) or a plain http(s) URL - both are accepted by
-        MTMDChatHandler."""
+        """Rewrites a plain-text user message into the OpenAI-style multimodal
+        content list form, appending an image alongside the existing text.
+        image_data_uri is a data: URI (base64) or a plain http(s) URL - both
+        llama.cpp's MTMDChatHandler and OpenAI-compatible vision APIs accept
+        this same content-block shape."""
         return {
             "role": user_message["role"],
             "content": [
@@ -151,7 +95,7 @@ class LocalAgent:
     def complete(self, **kwargs):
         """Non-streaming completion for internal side-tasks (memory
         reflection, session summaries) that shouldn't touch chat history."""
-        return self.llm.create_chat_completion(**kwargs)
+        return self.provider.complete(**kwargs)
 
     def run_stream(self, messages: list):
         """The ReAct loop: Thought -> Action (<tool_call>) -> Observation ->
@@ -299,7 +243,7 @@ class LocalAgent:
         suppressed = False
         full_text = ""
 
-        stream = self.llm.create_chat_completion(messages=messages, stream=True, **self.sampling_params)
+        stream = self.provider.stream_completion(messages, **self.sampling_params)
         for chunk in stream:
             delta = chunk["choices"][0]["delta"].get("content")
             if not delta:

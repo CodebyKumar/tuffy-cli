@@ -45,6 +45,53 @@ registry.register(
     },
 )
 
+# --- API-provider models -----------------------------------------------
+# These use the generic OpenAI-compatible adapter (src/llm/openai_compatible_provider.py)
+# instead of loading local weights. Nothing "loads" at startup — the API key
+# is only read (from the env var named below) when you actually switch to
+# one of these with /models <id>. Point base_url/model_name at whichever
+# OpenAI-wire-format provider you use (OpenAI itself, Groq, Together,
+# OpenRouter, a local vLLM/Ollama OpenAI-compat server, etc.) and export the
+# matching API key before switching.
+
+registry.register(
+    model_id="gpt-4o-mini-api",
+    name="GPT-4o mini (API)",
+    family="GPT-4o",
+    quantization="none",
+    capabilities=["text", "vision"],
+    provider="openai_compatible",
+    context_length=128000,
+    parameters=None,
+    license=None,
+    source="https://platform.openai.com/docs/models",
+    description="OpenAI's GPT-4o mini via the OpenAI API. Requires OPENAI_API_KEY.",
+    provider_config={
+        "base_url": "https://api.openai.com/v1",
+        "api_key_env": "OPENAI_API_KEY",
+        "model_name": "gpt-4o-mini",
+    },
+)
+
+registry.register(
+    model_id="llama-3.3-70b-groq-api",
+    name="Llama 3.3 70B (Groq API)",
+    family="Llama-3.3",
+    quantization="none",
+    capabilities=["text"],
+    provider="openai_compatible",
+    context_length=128000,
+    parameters="70B",
+    license="Llama 3.3 Community License",
+    source="https://console.groq.com/docs/models",
+    description="Meta's Llama 3.3 70B served by Groq's OpenAI-compatible API. Requires GROQ_API_KEY.",
+    provider_config={
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_key_env": "GROQ_API_KEY",
+        "model_name": "llama-3.3-70b-versatile",
+    },
+)
+
 registry.register(
     model_id="qwen3vl-2b-instruct-q80",
     name="Qwen3-VL 2B Instruct (Q8_0)",
