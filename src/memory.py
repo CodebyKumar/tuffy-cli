@@ -303,7 +303,8 @@ def summarize_session(complete_fn, messages: list) -> str:
         "key": {"type": "string", "description": "Short snake_case label for the fact, e.g. 'name', 'favorite_color'."},
         "value": {"type": "string", "description": "The fact to store."}
     },
-    required=["key", "value"]
+    required=["key", "value"],
+    group="memory",
 )
 def remember(key: str, value: str) -> str:
     changed, reason = store_fact(key, value, source="explicit")

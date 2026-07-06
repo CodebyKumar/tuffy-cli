@@ -29,7 +29,7 @@ import cv2
 import numpy as np
 
 from src.tools.registry import registry
-from src.workspace import WORKSPACE_DIR, safe_workspace_path
+from src.tools.editing import WORKSPACE_DIR, safe_workspace_path
 
 IMAGES_SUBDIR = "images"  # camera captures live under agent_workspace/images/, not loose in the root
 
@@ -80,7 +80,8 @@ def encode_image_to_data_uri(path: str) -> str:
     name="capture_image",
     description="Take a photo with the machine's camera right now. Call this IMMEDIATELY whenever the user asks you to take/click/snap a picture, look at them, see them, or check the camera — never reply 'I'm taking a picture' or 'just say the word' in text; the only way to actually take a photo is calling this tool. Not for files already on disk.",
     parameters={},
-    required=[]
+    required=[],
+    group="system",
 )
 def capture_image(placeholder: str = "") -> str:
     try:
@@ -115,7 +116,8 @@ def capture_image(placeholder: str = "") -> str:
     name="view_image",
     description="Load an image file from a filesystem path so you can look at its contents. Use this ONLY when the user typed a file path in their message — pass that exact path, never an invented or remembered one. If an image is already attached to the conversation, just look at it directly; no tool call needed.",
     parameters={"path": {"type": "string", "description": "The exact filesystem path the user gave in their message."}},
-    required=["path"]
+    required=["path"],
+    group="system",
 )
 def view_image(path: str) -> str:
     try:
