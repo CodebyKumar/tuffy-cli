@@ -31,3 +31,6 @@ agent_workspace/
 # Editor / Extension packages
 *.vsix
 
+# Local MCP server config (may contain commands/env referencing local paths or secrets)
+mcp_servers.json
+
