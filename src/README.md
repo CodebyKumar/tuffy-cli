@@ -10,11 +10,19 @@ job and `main.py`'s alone. Every other package is usable headless.
 | [memory.py](memory.py) | Long-term memory (profile/notes/sessions/lessons): the `remember` tool, fact extraction, session summaries, and the quarantine boundary that rejects identity-shaped or junk extractions. |
 | [vision.py](vision.py) | Image encoding (file → data URI) and the `IMAGE_SENTINEL` protocol tools use to hand an image back to the agent loop. |
 | [cli/](cli/) | The interactive terminal chat: banner, spinner, slash commands, turn loop. Only `main.py` imports this. |
-| [llm/](llm/) | `LLMProvider` interface + adapters (`llama_cpp`, `openai_compatible`) — how `agent.py` talks to a model without hardcoding a backend. |
-| [models/](models/) | `ModelRegistry` — model cards (local GGUF or API), load params, sampling params; `weights/` holds gitignored GGUF files. |
+| [llm/](llm/) | `LLMProvider` interface + adapters (`llama_cpp`, `openai_compatible`) — how `agent.py` talks to a model without hardcoding a backend. API failures (rate limits, bad keys, network errors) surface as `ProviderError`, caught by `src/cli/turn.py` so the session survives. |
+| [models/](models/) | `ModelRegistry` — model cards, load params, sampling params, rate-limit metadata. `configs/local.py` and `configs/api.py` hold the actual model card definitions; `weights/` holds gitignored GGUF files. |
 | [prompts/](prompts/) | Every system-prompt string, centralized: `personas.yaml` (static tone/rules) + `templates.py` (Python-built fragments). |
 | [tools/](tools/) | Native tools the agent can call, grouped by domain, plus the MCP client that registers external servers' tools the same way. |
 | [skills/](skills/) | Discovery/loading mechanism for `./skills/*/` capability packs (content lives at the repo root, not here). |
+
+## Environment variables
+
+API-provider models read their key from an environment variable named by the model card's
+`api_key_env` (see [llm/README.md](llm/README.md#api-keys)). [env.py](env.py) loads a `.env` file
+from the repo root into `os.environ` at startup, for anything not already exported in your
+shell — a real exported env var always wins over `.env`. `.env` is gitignored, so keys placed
+there are never committed.
 
 ## Request flow
 

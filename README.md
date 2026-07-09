@@ -50,7 +50,7 @@ Run `/help` inside Tuffy for the full categorized list, or see
 - `/tools` - List all tools the agent can call, grouped by domain.
 - `/skills` - List installed skills (drop new ones in `./skills/<name>/`).
 - `/mcp` - List connected MCP servers and the tools they registered.
-- `/status` - Show the active model, vision support, and turn count for this session.
+- `/status` - Show the active model, vision support, turn count, estimated context usage, and rate limits (API models).
 
 **Models**
 - `/models` - List available models (local and API) and show which one is active.
@@ -81,9 +81,13 @@ pip install -r pyproject.toml
 
 ### 3. Add a model
 Tuffy ships with no model registered by default — you choose what runs it. Register a local
-model (place its weight file under `src/models/weights/`) or an API-provider model in
-[src/models/__init__.py](src/models/__init__.py), then set it as `DEFAULT_MODEL` or switch to it
-at runtime with `/models <id>`. Full walkthrough (including API-key setup for hosted models):
+model (place its weight file under `src/models/weights/`) in
+[src/models/configs/local.py](src/models/configs/local.py), or an API-provider model in
+[src/models/configs/api.py](src/models/configs/api.py), then set it as `DEFAULT_MODEL` (in
+[src/models/__init__.py](src/models/__init__.py)) or switch to it at runtime with `/models <id>`.
+For API models, put the provider's API key in `.env` at the repo root (e.g.
+`GROQ_API_KEY=...`) — Tuffy loads it automatically at startup, no manual `export` needed. Full
+walkthrough (including rate-limit metadata for hosted models):
 [docs/configure-models.md](docs/configure-models.md).
 
 ### 4. (Optional) Connecting MCP servers
@@ -109,15 +113,16 @@ python3 main.py
 ## Project Structure
 
 ```
-main.py                 Entry point: startup wiring (skills/MCP discovery), then the input loop
+main.py                 Entry point: loads .env, startup wiring (skills/MCP discovery), then the input loop
 src/
+  env.py                 Loads .env into os.environ (real env vars always take precedence)
   cli/                  Interactive terminal chat: banner, spinner, slash commands, turn loop
   agent.py              LocalAgent — the provider-agnostic ReAct tool-calling loop
   identity.py           Fixed self-model (name, capabilities) — never LLM-written
   memory.py             Long-term memory (profile/notes/sessions/lessons) + the `remember` tool
   vision.py              Image encoding + IMAGE_SENTINEL protocol for vision tool results
   llm/                   Model-provider interface + adapters (local weights, OpenAI-compatible API)
-  models/                Model registry; weights/ holds gitignored model weight files
+  models/                Model registry; configs/local.py + configs/api.py hold model cards; weights/ holds gitignored model weight files
   prompts/               All system-prompt text: personas.yaml + templates.py
   tools/                 Native tools by domain (editing/coding/research/system) + MCP client
   skills/                Discovery/loading for ./skills/*/ capability packs
@@ -125,6 +130,7 @@ skills/                 Droppable capability packs (SKILL.md + optional tools.py
 docs/                   Configuration guides (models, MCP, skills, tools, CLI reference)
 data/memory/            JSON-backed long-term memory store
 agent_workspace/        Sandboxed file I/O root for the agent's file/code tools
+.env                    API keys (gitignored) — loaded automatically at startup
 ```
 
 Every folder above has its own README with more detail — start at [src/README.md](src/README.md)
