@@ -6,6 +6,9 @@ import os
 import sys
 import traceback
 
+from src.env import load_dotenv
+load_dotenv()  # fills os.environ from ./.env for anything not already exported
+
 from src.models import DEFAULT_MODEL
 from src.models.registry import registry as model_registry
 from src.skills.loader import discover_skills, mcp_configs_from_skills
