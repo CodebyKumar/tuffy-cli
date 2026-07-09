@@ -18,12 +18,28 @@ from src.cli.display import C_DIM, C_WARN, C_USER, C_BLUE, C_RESET, CLEAR_LINE
 MAX_HISTORY_CHARS = 6000
 
 
+def _limits_line(model_card: dict) -> str:
+    parts = []
+    if model_card.get("context_length"):
+        parts.append(f"context {model_card['context_length']:,} tok")
+    limits = model_card.get("rate_limits") or {}
+    if limits:
+        parts.append(f"{limits['requests_per_minute']} req/min")
+        parts.append(f"{limits['requests_per_day']:,} req/day")
+        parts.append(f"{limits['tokens_per_minute']:,} tok/min")
+        parts.append(f"{limits['tokens_per_day']:,} tok/day")
+    return " | ".join(parts)
+
+
 def load_agent(model_id: str) -> LocalAgent:
     model_card = model_registry.get(model_id)
     print(f"{C_DIM}Loading model '{model_id}'...{C_RESET}")
     agent = LocalAgent(model_card)
     vision = "vision on" if agent.supports_vision else "text only"
     print(f"{C_DIM}Ready: {model_card['name']} ({vision}){C_RESET}")
+    limits_line = _limits_line(model_card)
+    if limits_line:
+        print(f"{C_DIM}{limits_line}{C_RESET}")
     if agent.vision_disabled_reason:
         print(f"{C_WARN}[Vision disabled] {agent.vision_disabled_reason}{C_RESET}")
     return agent
@@ -57,6 +73,14 @@ def _content_char_count(content) -> int:
     if isinstance(content, str):
         return len(content)
     return sum(len(part.get("text", "")) for part in content if part.get("type") == "text")
+
+
+def estimate_tokens(messages: list) -> int:
+    """Rough token count for the given messages, via the same chars/4 proxy
+    trim_history uses for its budget. No provider here returns real usage
+    counts mid-stream, so this is what /status and the model-load banner
+    show as 'current context usage' — an estimate, not an exact count."""
+    return sum(_content_char_count(m["content"]) for m in messages) // 4
 
 
 def trim_history(messages: list) -> list:
@@ -158,7 +182,20 @@ class Session:
         gc.collect()
         self.agent = new_agent
         self._wire_agent_callbacks()
+        old_model_id = self.current_model_id
         self.current_model_id = model_id
+        # Conversation history is kept (not reset) across a model switch, but
+        # the new model needs to know a switch happened - otherwise it can
+        # mistake a plain "hi" for a nudge to re-answer the last unresolved
+        # question in the carried-over history instead of just greeting back.
+        self.messages.append({
+            "role": "system",
+            "content": (
+                f"[Model switched from '{old_model_id}' to '{model_id}'. "
+                "Prior turns above are already answered - do not re-answer "
+                "them unless the user explicitly asks again.]"
+            ),
+        })
 
     def end(self):
         """Writes this session into episodic memory, then frees the model."""
