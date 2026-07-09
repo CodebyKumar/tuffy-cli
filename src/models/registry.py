@@ -110,6 +110,7 @@ class ModelRegistry:
         load_params: dict = None,
         sampling_params: dict = None,
         provider_config: dict = None,
+        rate_limits: dict = None,
     ) -> None:
         """Adds one model to the registry with its full model card. Works
         uniformly for local gguf models and API-provider models — /models and
@@ -117,8 +118,8 @@ class ModelRegistry:
         adapter picked by 'provider' cares which fields it reads.
 
         model_id: unique key used with /models <id>, e.g. 'qwen3vl-2b-instruct-q4km'
-            or 'gpt-4o-mini-api'. Kept fully qualified (family + size + variant +
-            quant, or family + '-api') so distinct variants never collide.
+            or 'llama-3.3-70b-groq'. Kept fully qualified (family + size + variant +
+            quant, or family + size + provider name) so distinct variants never collide.
         name: human-readable full model card name, e.g.
             'Qwen3-VL 2B Instruct (Q4_K_M)'.
         family: base model family, e.g. 'Qwen3-VL' or 'GPT-4o'.
@@ -151,6 +152,12 @@ class ModelRegistry:
             {"base_url": ..., "api_key_env": "OPENAI_API_KEY", "model_name": "gpt-4o-mini"}.
             api_key_env names an environment variable read at load time — the
             key itself is never stored in the model card or written to disk.
+        rate_limits: (openai_compatible only, optional) dict of
+            {"requests_per_minute", "requests_per_day", "tokens_per_minute",
+            "tokens_per_day"} as published by the provider (e.g. Groq's model
+            page). Metadata only, shown in /models info and the post-load
+            banner — nothing in this codebase enforces or throttles against
+            these; the provider's own API returns 429 if you exceed them.
         """
         unknown_caps = set(capabilities) - KNOWN_CAPABILITIES
         if unknown_caps:
@@ -182,6 +189,7 @@ class ModelRegistry:
             "load_params": {**LOAD_PARAM_DEFAULTS, **(load_params or {})},
             "sampling_params": {**SAMPLING_PARAM_DEFAULTS, **(sampling_params or {})},
             "provider_config": provider_config or {},
+            "rate_limits": rate_limits or {},
         }
 
     def get(self, model_id: str) -> dict:
