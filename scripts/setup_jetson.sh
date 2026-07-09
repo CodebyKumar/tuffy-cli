@@ -74,6 +74,47 @@ elif [ ! -f .env ]; then
     echo "    create .env in the repo root with e.g. GROQ_API_KEY=... before switching to it."
 fi
 
+# --- 7. Install the `tuffy` shell command --------------------------------
+# Same launcher used on other machines: cd into the project, activate its
+# venv if present, run main.py. TUFFY_HOME is pinned to wherever this script
+# actually found the project (PROJECT_ROOT), so it works regardless of where
+# the folder ended up on this box (pendrive copy, ~/tuffy, /opt/tuffy, ...).
+RC_FILE=""
+if [ -n "${ZSH_VERSION:-}" ] || [ "$(basename "${SHELL:-}")" = "zsh" ]; then
+    RC_FILE="$HOME/.zshrc"
+elif [ -n "${BASH_VERSION:-}" ] || [ "$(basename "${SHELL:-}")" = "bash" ]; then
+    RC_FILE="$HOME/.bashrc"
+fi
+
+if [ -n "$RC_FILE" ]; then
+    if [ -f "$RC_FILE" ] && grep -q "^tuffy() {" "$RC_FILE" 2>/dev/null; then
+        echo "==> 'tuffy' command already present in $RC_FILE — leaving it as-is."
+    else
+        echo "==> Adding 'tuffy' shell command to $RC_FILE"
+        cat >> "$RC_FILE" << EOF
+
+# Tuffy agent launcher (added by scripts/setup_jetson.sh)
+export TUFFY_HOME="$PROJECT_ROOT"
+tuffy() {
+    local project_dir="\${TUFFY_HOME:-$PROJECT_ROOT}"
+    cd "\$project_dir" || return
+    if [ -f ".venv/bin/activate" ]; then
+        source .venv/bin/activate
+    fi
+    if command -v python >/dev/null 2>&1; then
+        python main.py
+    else
+        python3 main.py
+    fi
+}
+EOF
+        echo "    Run 'source $RC_FILE' (or open a new terminal) to start using 'tuffy'."
+    fi
+else
+    echo "WARNING: couldn't detect bash or zsh — skipping 'tuffy' command setup."
+    echo "         Run the app directly with: python3 $PROJECT_ROOT/main.py"
+fi
+
 echo "==> Setup complete."
 echo "==> Launching Tuffy..."
 exec python3 main.py
