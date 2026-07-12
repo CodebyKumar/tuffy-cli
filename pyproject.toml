@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "ddgs>=9.14.4",
+    "elastimem",
     "llama-cpp-python>=0.3.32",
     "mcp>=1.28.1",
     "opencv-python>=4.10.0",
@@ -13,3 +14,6 @@ dependencies = [
     "pyyaml>=6.0.3",
     "requests>=2.34.2",
 ]
+
+[tool.uv.sources]
+elastimem = { path = "../elastimem", editable = true }

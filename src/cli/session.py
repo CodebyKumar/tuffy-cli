@@ -8,14 +8,8 @@ import os
 
 from src.agent import LocalAgent
 from src.prompts import build_system_prompt
-from src.memory import summarize_session, add_session_summary
 from src.models.registry import registry as model_registry
 from src.cli.display import C_DIM, C_WARN, C_USER, C_BLUE, C_AI, C_RESET, CLEAR_LINE
-
-# Keep the rolling chat history well under n_ctx (4096 tokens) so the
-# system prompt (rules + memory + protocol examples) never gets silently
-# truncated by llama.cpp. This is a rough char-based proxy for token count.
-MAX_HISTORY_CHARS = 6000
 
 
 def _limits_line(model_card: dict) -> str:
@@ -83,23 +77,59 @@ def estimate_tokens(messages: list) -> int:
     return sum(_content_char_count(m["content"]) for m in messages) // 4
 
 
-def trim_history(messages: list) -> list:
-    """Keeps the system prompt plus the most recent turns that fit the budget.
-    The newest message is always kept even if it alone busts the budget —
-    dropping the question the user just asked is never acceptable."""
+def trim_history(messages: list, plan) -> list:
+    """Keeps the system prompt, plus the newest user message, and the most
+    recent user/assistant pairs within plan.keep_last_n_turns. Old turns are
+    evicted and reported to elastimem, unless they are image-bearing or the newest user msg."""
+    if len(messages) <= 2:
+        return messages
+
     system_msg = messages[0]
-    convo = messages[1:]
+    # The last message is the new user query. It must never be evicted.
+    newest_user_msg = messages[-1]
+    
+    # Completed turns are between system message (index 0) and the newest user message (last index).
+    convo = messages[1:-1]
+    
+    # Let's find all completed user/assistant pairs, scanning backwards.
+    pairs = []
+    i = len(messages) - 2  # start at the last assistant reply (since -1 is the new user query)
+    while i > 0:
+        if messages[i].get("role") == "assistant" and i - 1 > 0 and messages[i-1].get("role") == "user":
+            pairs.append((i - 1, i))
+            i -= 2
+        else:
+            i -= 1
 
-    kept = []
-    total_chars = 0
-    for msg in reversed(convo):
-        total_chars += _content_char_count(msg["content"])
-        if kept and total_chars > MAX_HISTORY_CHARS:
-            break
-        kept.append(msg)
-    kept.reverse()
+    # Keep the newest plan.keep_last_n_turns pairs
+    keep_n = getattr(plan, "keep_last_n_turns", 3)
+    pairs_to_keep = pairs[:keep_n]
+    pairs_to_evict = pairs[keep_n:]
 
-    return [system_msg] + kept
+    indices_to_remove = set()
+    evicted_pairs = []
+
+    for u_idx, a_idx in pairs_to_evict:
+        u_msg = messages[u_idx]
+        a_msg = messages[a_idx]
+        # Never evict if either message contains an image
+        if isinstance(u_msg.get("content"), list) or isinstance(a_msg.get("content"), list):
+            continue
+        
+        evicted_pairs.append((u_msg["content"], a_msg["content"]))
+        indices_to_remove.add(u_idx)
+        indices_to_remove.add(a_idx)
+
+    if evicted_pairs:
+        # Reverse to report in chronological order (oldest first)
+        evicted_pairs.reverse()
+        import src.memory as memory
+        memory.mem.report_evictions(evicted_pairs)
+
+    # Reconstruct the chat history, filtering out the evicted indices
+    new_convo = [msg for idx, msg in enumerate(messages) if idx != 0 and idx != len(messages) - 1 and idx not in indices_to_remove]
+    
+    return [system_msg] + new_convo + [newest_user_msg]
 
 
 def compact_turn(messages: list, turn_start: int) -> None:
@@ -176,10 +206,13 @@ class Session:
         if self.active_spinner is not None:
             self.active_spinner.set_label(label)
 
-    def system_message(self) -> dict:
+    def system_message(self, context_plan=None) -> dict:
         return {
             "role": "system",
-            "content": build_system_prompt(model_card=model_registry.get(self.current_model_id)),
+            "content": build_system_prompt(
+                model_card=model_registry.get(self.current_model_id),
+                context_plan=context_plan
+            ),
         }
 
     def switch_model(self, model_id: str):
@@ -188,9 +221,15 @@ class Session:
         leaves the session on its previous, working model instead of with no
         agent at all."""
         new_agent = load_agent(model_id)
+        import src.memory as memory
+        memory.mem.drain()
         self.agent.unload()
         gc.collect()
         self.agent = new_agent
+        memory.attach_llm(self.agent.complete)
+        new_card = model_registry.get(model_id)
+        static_tokens = len(build_system_prompt(model_card=new_card)) // 4
+        memory.reconfigure_for_model(new_card, static_prompt_tokens=static_tokens)
         self._wire_agent_callbacks()
         old_model_id = self.current_model_id
         self.current_model_id = model_id
@@ -209,9 +248,8 @@ class Session:
 
     def end(self):
         """Writes this session into episodic memory, then frees the model."""
-        summary = summarize_session(self.agent.complete, self.messages)
-        if summary:
-            add_session_summary(summary)
+        import src.memory as memory
+        memory.mem.end_session()
         self.agent.unload()
         gc.collect()
 

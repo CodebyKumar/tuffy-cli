@@ -35,7 +35,13 @@ connect_mcp_servers(extra_configs=mcp_configs_from_skills())
 def main():
     print_logo()
     session = Session(DEFAULT_MODEL)
-    model_name = model_registry.get(session.current_model_id)["name"]
+    import src.memory as memory
+    from src.prompts import build_system_prompt
+    memory.attach_llm(session.agent.complete)
+    model_card = model_registry.get(session.current_model_id)
+    static_tokens = len(build_system_prompt(model_card=model_card)) // 4
+    memory.reconfigure_for_model(model_card, static_prompt_tokens=static_tokens)
+    model_name = model_card["name"]
     print_session_info(model_name, session.agent.supports_vision)
 
     while True:
@@ -79,4 +85,6 @@ if __name__ == "__main__":
     finally:
         sys.stdout.flush()
         sys.stderr.flush()
+        import src.memory as memory
+        memory.mem.close()
         os._exit(exit_code)

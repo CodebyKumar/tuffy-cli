@@ -5,7 +5,7 @@ change."""
 
 import os
 
-from src.memory import clear_memory, load_memory, load_sessions, load_lessons
+import src.memory as memory
 from src.tools.registry import registry, group_title
 from src.tools.mcp_client import connected_servers, MCP_CONFIG_PATH
 from src.models.registry import registry as model_registry
@@ -19,11 +19,16 @@ from src.cli.display import C_DIM, C_SUCCESS, C_WARN, C_BLUE, C_BOLD, C_RESET
 _HELP_SECTIONS = [
     ("Chat", [
         ("/new", "start a fresh conversation (keeps long-term memory)"),
-        ("/clear", "wipe long-term memory AND the conversation"),
+        ("/clear", "wipe current conversation history (keeps long-term memory)"),
+        ("/purge", "wipe long-term memory database (archives old DB)"),
         ("/image <path>", "attach an image to your next message (vision models only)"),
     ]),
     ("Inspect", [
-        ("/memory", "show everything in long-term memory (facts, sessions, lessons)"),
+        ("/memory", "show summary, facts, sessions, and lessons from memory"),
+        ("/memory search <query>", "search past conversations and facts"),
+        ("/memory facts <key>", "show all version history of a specific fact key"),
+        ("/memory forget <key>", "forget a specific fact key (non-destructive tombstone)"),
+        ("/memory quarantine", "show recently rejected/quarantined auto-extractions"),
         ("/tools", "list every tool the agent can call, grouped by domain"),
         ("/skills", "list installed skills (drop new ones in ./.tuffy/skills/<name>/)"),
         ("/mcp", "list connected MCP servers and the tools they registered"),
@@ -59,33 +64,101 @@ def cmd_new(session: Session):
 
 
 def cmd_clear(session: Session):
-    clear_memory()
     session.messages = [session.system_message()]
-    print(f"{C_SUCCESS}Memory and conversation history cleared.{C_RESET}\n")
+    print(f"{C_SUCCESS}Conversation history cleared. Long-term memory is unchanged.{C_RESET}\n")
+
+
+def cmd_purge(session: Session):
+    memory.clear_memory()
+    session.messages = [session.system_message()]
+    print(f"{C_SUCCESS}Memory database cleared and archived. Conversation history reset.{C_RESET}\n")
 
 
 # --- /memory -------------------------------------------------------------
 
-def cmd_memory(session: Session):
-    facts = load_memory()
-    sessions = load_sessions(n=5)
-    lessons = load_lessons()
-    print(f"{C_SUCCESS}Long-term memory{C_RESET}")
-    print(f"{C_DIM}Facts about you:{C_RESET}")
-    if facts:
-        for k, v in facts.items():
-            print(f"  {k}: {v}")
+def cmd_memory(session: Session, arg: str = ""):
+    arg = arg.strip()
+    if not arg:
+        stats = memory.mem.stats()
+        facts = memory.mem.facts()
+        sessions = memory.mem.sessions(n=5)
+        lessons = memory.mem.lessons()
+        
+        print(f"{C_SUCCESS}Long-term memory status & contents{C_RESET}")
+        profile = memory.mem.profile
+        print(f"  {C_DIM}Tier:{C_RESET} {profile.tier.name} | {C_DIM}Facts:{C_RESET} {stats.get('facts', 0)} | {C_DIM}Sessions:{C_RESET} {stats.get('sessions', 0)} | {C_DIM}Lessons:{C_RESET} {stats.get('lessons', 0)}")
+        print(f"  {C_DIM}Database file:{C_RESET} {stats.get('path')} ({stats.get('db_bytes', 0) / 1024:.1f} KB)")
+        
+        print(f"\n{C_DIM}Facts about you:{C_RESET}")
+        if facts:
+            for k, v in facts.items():
+                print(f"  {k}: {v}")
+        else:
+            print("  (none yet — they accumulate as you chat)")
+            
+        if sessions:
+            print(f"\n{C_DIM}Recent sessions:{C_RESET}")
+            for s in reversed(sessions):
+                summary = s.get("summary")
+                if summary:
+                    print(f"  - [{s.get('ended_at') or 'active'}] {summary}")
+                    
+        if lessons:
+            print(f"\n{C_DIM}Lessons learned:{C_RESET}")
+            for l in lessons:
+                print(f"  - {l}")
+        print()
+        return
+
+    parts = arg.split(" ", 1)
+    subcmd = parts[0].lower()
+    subarg = parts[1].strip() if len(parts) > 1 else ""
+
+    if subcmd == "search":
+        if not subarg:
+            print(f"{C_WARN}Usage: /memory search <query>{C_RESET}\n")
+            return
+        hits = memory.mem.recall(subarg)
+        print(f"{C_SUCCESS}Search results for '{subarg}':{C_RESET}")
+        if not hits:
+            print("  No relevant memories found.")
+        for hit in hits:
+            print(f"  - [{hit.date}] [{hit.kind}] {hit.text} (score: {hit.score:.2f})")
+        print()
+        
+    elif subcmd == "facts":
+        if not subarg:
+            print(f"{C_WARN}Usage: /memory facts <key>{C_RESET}\n")
+            return
+        history = memory.mem.fact_history(subarg)
+        print(f"{C_SUCCESS}Version history for fact '{subarg}':{C_RESET}")
+        if not history:
+            print(f"  No fact found with key '{subarg}'.")
+        for fact in history:
+            status = "archived" if fact.archived else ("invalidated" if fact.invalidated_at else "active")
+            print(f"  - [{fact.valid_from}] {fact.value} ({status})")
+        print()
+        
+    elif subcmd == "forget":
+        if not subarg:
+            print(f"{C_WARN}Usage: /memory forget <key>{C_RESET}\n")
+            return
+        found = memory.mem.forget(subarg)
+        if found:
+            print(f"{C_SUCCESS}Fact '{subarg}' has been tombstoned (forgotten).{C_RESET}\n")
+        else:
+            print(f"{C_WARN}Fact '{subarg}' was not found.{C_RESET}\n")
+            
+    elif subcmd == "quarantine":
+        entries = memory.mem.quarantine_entries(20)
+        print(f"{C_SUCCESS}Recently rejected/quarantined extractions:{C_RESET}")
+        if not entries:
+            print("  No quarantined entries.")
+        for entry in entries:
+            print(f"  - [{entry.get('ts')}] '{entry.get('key')}': '{entry.get('value')}' - {entry.get('reason')} (source: {entry.get('source')})")
+        print()
     else:
-        print("  (none yet — they accumulate as you chat)")
-    if sessions:
-        print(f"{C_DIM}Recent sessions:{C_RESET}")
-        for s in sessions:
-            print(f"  - {s}")
-    if lessons:
-        print(f"{C_DIM}Lessons learned:{C_RESET}")
-        for l in lessons:
-            print(f"  - {l}")
-    print()
+        print(f"{C_WARN}Unknown memory subcommand: {subcmd}. Use search, facts, forget, or quarantine.{C_RESET}\n")
 
 
 # --- /models ---------------------------------------------------------------
@@ -268,8 +341,12 @@ def handle_command(session: Session, stripped: str) -> str:
         cmd_help(session)
         return "handled"
 
-    if command == "/memory":
-        cmd_memory(session)
+    if command == "/purge":
+        cmd_purge(session)
+        return "handled"
+
+    if command == "/memory" or stripped.lower().startswith("/memory "):
+        cmd_memory(session, stripped[len("/memory"):].strip())
         return "handled"
 
     if command == "/status":

@@ -12,7 +12,6 @@ prompt string themselves.
 import os
 import yaml
 
-from src.memory import load_memory, load_sessions, load_lessons
 from src.tools.registry import registry
 from src.skills.loader import skill_prompt_lines
 from src.prompts import templates
@@ -32,7 +31,7 @@ def load_preset(name: str = None) -> str:
     return presets[preset_name]["system_prompt"]
 
 
-def build_system_prompt(preset_name: str = None, model_card: dict = None) -> str:
+def build_system_prompt(preset_name: str = None, model_card: dict = None, context_plan = None) -> str:
     """Renders a named personas.yaml preset plus the agent's self-model and
     the current runtime context (tool signatures, memory, past sessions,
     lessons, protocol examples) into the full system prompt."""
@@ -41,9 +40,7 @@ def build_system_prompt(preset_name: str = None, model_card: dict = None) -> str
         sections.append(templates.self_model(model_card))
     sections.append(templates.runtime_context(
         tool_lines=registry.tool_lines(),
-        known_facts=load_memory(),
-        session_summaries=load_sessions(),
-        lessons=load_lessons(),
+        context_plan=context_plan,
         skill_lines=skill_prompt_lines(),
     ))
     return "\n\n".join(sections)

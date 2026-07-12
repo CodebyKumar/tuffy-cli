@@ -64,9 +64,7 @@ def self_model(model_card: dict) -> str:
 
 def runtime_context(
     tool_lines: list,
-    known_facts: dict,
-    session_summaries: list,
-    lessons: list,
+    context_plan = None,
     skill_lines: list = None,
 ) -> str:
     """The dynamic part of the system prompt: tool signatures, long-term
@@ -82,28 +80,46 @@ def runtime_context(
             "looks relevant to what the user is asking):\n" + "\n".join(skill_lines)
         )
 
-    if known_facts:
-        facts_block = "\n".join(f"- {k}: {v}" for k, v in known_facts.items())
-        sections.append(
-            "WHAT YOU KNOW ABOUT THE USER (long-term memory — answer from this "
-            "directly, no tool call needed):\n" + facts_block
-        )
+    if context_plan:
+        user_facts = context_plan.sections.get("user_facts", "").strip()
+        if user_facts:
+            sections.append(
+                "WHAT YOU KNOW ABOUT THE USER (long-term memory — answer from this "
+                "directly, no tool call needed):\n" + user_facts
+            )
+        else:
+            sections.append(
+                "WHAT YOU KNOW ABOUT THE USER: nothing stored yet. As you learn "
+                "facts about them, they will appear here."
+            )
+
+        relevant_moments = context_plan.sections.get("relevant_past_moments", "").strip()
+        if relevant_moments:
+            sections.append(
+                "RELEVANT PAST MOMENTS (from your memory of previous conversations):\n"
+                + relevant_moments
+            )
+
+        prev_sessions = context_plan.sections.get("previous_sessions", "").strip()
+        if prev_sessions:
+            sections.append(
+                "PREVIOUS SESSIONS:\n" + prev_sessions
+            )
+
+        lessons = context_plan.sections.get("lessons", "").strip()
+        if lessons:
+            sections.append(
+                "LESSONS FROM YOUR OWN PAST MISTAKES (apply these):\n" + lessons
+            )
+
+        if getattr(context_plan, "rolling_summary", None):
+            sections.append(
+                "EARLIER IN THIS CONVERSATION (condensed):\n" + context_plan.rolling_summary
+            )
     else:
         sections.append(
             "WHAT YOU KNOW ABOUT THE USER: nothing stored yet. As you learn "
             "facts about them, they will appear here."
-        )
-
-    if session_summaries:
-        sections.append(
-            "PREVIOUS SESSIONS (most recent last):\n"
-            + "\n".join(f"- {s}" for s in session_summaries)
-        )
-
-    if lessons:
-        sections.append(
-            "LESSONS FROM YOUR OWN PAST MISTAKES (apply these):\n"
-            + "\n".join(f"- {l}" for l in lessons)
         )
 
     sections.append("PROTOCOL EXAMPLES\n" + _REACT_EXAMPLES)

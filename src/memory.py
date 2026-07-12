@@ -1,300 +1,180 @@
-"""Long-term memory: the store that makes the agent self-evolving.
+"""Long-term memory adapter wrapping the Elastimem framework."""
 
-Layout under data/memory/ (see data/memory/README.md):
-  user/profile.json    - allowlisted personal-info fields about the user.
-  user/notes.json      - every other durable fact about the user.
-  agent/lessons.json   - capped operational lessons learned from tool failures.
-  sessions/log.json    - episodic summaries of past sessions.
-  quarantine.json      - extraction hits rejected by validation, kept for
-                         debugging in Ray mode; never fed back into the prompt.
-
-What does NOT live here: identity ("what model are you", "what's your
-purpose") — that's src/identity.py, code-owned and never LLM-written. This
-module actively refuses to store identity-shaped keys (see _is_identity_key)
-because a small model cannot reliably separate "the user told me a fact
-about themselves" from "I just said something about myself" — it kept
-storing its own model name/role/purpose as if they were user facts.
-
-Memory updates through three channels:
-1. The 'remember' tool, when the user explicitly asks.
-2. extract_facts(): a validated reflection pass main.py runs after each turn
-   (off the main thread — see main.py's AsyncMemory), so facts the user
-   mentions in passing get stored without any tool call.
-3. add_session_summary()/add_lesson(): written on exit and by the agent loop
-   when a failed tool call is corrected.
-"""
-
-import json
 import os
-import re
+import json
+import shutil
+import elastimem
 from datetime import datetime
-
-from src.identity import RESERVED_IDENTITY_KEYS, is_self_referential_value, is_transcript_key
+from src.identity import RESERVED_IDENTITY_KEYS
 from src.tools.registry import registry
 
-MEMORY_DIR = "./data/memory"
-PROFILE_FILE = os.path.join(MEMORY_DIR, "user", "profile.json")
-NOTES_FILE = os.path.join(MEMORY_DIR, "user", "notes.json")
-SESSIONS_FILE = os.path.join(MEMORY_DIR, "sessions", "log.json")
-LESSONS_FILE = os.path.join(MEMORY_DIR, "agent", "lessons.json")
-QUARANTINE_FILE = os.path.join(MEMORY_DIR, "quarantine.json")
+DB_DIR = "./data/memory"
+os.makedirs(DB_DIR, exist_ok=True)
+DB_PATH = os.path.join(DB_DIR, "tuffy.db")
 
-# Fixed allowlist of personal-info keys that get routed to profile.json.
-# Anything else the model remembers goes to notes.json.
-PROFILE_KEYS = {"name", "email", "location", "age", "occupation", "pronouns"}
+is_new_db = not os.path.exists(DB_PATH)
 
-# Values a reflection pass might extract that carry no real information —
-# refusing these stops "goals: unknown" style noise from ever being stored.
-_PLACEHOLDER_VALUES = {
-    "unknown", "n/a", "na", "none", "null", "not specified", "not provided",
-    "not sure", "unclear", "tbd", "?", "-", "",
-}
-
-MAX_SESSIONS_KEPT = 20
-SESSIONS_IN_PROMPT = 3
-MAX_LESSONS = 5
-MAX_QUARANTINE_KEPT = 50
-
-for _dir in (os.path.dirname(PROFILE_FILE), os.path.dirname(SESSIONS_FILE), os.path.dirname(LESSONS_FILE)):
-    os.makedirs(_dir, exist_ok=True)
-
-
-def _load_json(path: str, default):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return default
-
-
-def _save_json(path: str, data) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-
-def _normalize_key(key: str) -> str:
-    return re.sub(r"[^a-z0-9_]", "", key.strip().lower().replace(" ", "_"))
-
-
-def _is_identity_key(key: str) -> bool:
-    normalized = _normalize_key(key)
-    return normalized in RESERVED_IDENTITY_KEYS or any(
-        normalized == reserved or normalized.endswith(f"_{reserved}")
-        for reserved in RESERVED_IDENTITY_KEYS
-    )
-
-
-def _is_placeholder(value: str) -> bool:
-    return value.strip().lower() in _PLACEHOLDER_VALUES
-
-
-def _quarantine(key: str, value: str, reason: str) -> None:
-    """Records a rejected extraction for later inspection (Ray mode /memory
-    can surface this) instead of silently dropping it with no trace."""
-    entries = _load_json(QUARANTINE_FILE, [])
-    entries.append({
-        "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "key": key, "value": value, "reason": reason,
-    })
-    _save_json(QUARANTINE_FILE, entries[-MAX_QUARANTINE_KEPT:])
-
-
-def load_memory() -> dict:
-    """Merged view of profile + notes, for building the system prompt."""
-    return {**_load_json(PROFILE_FILE, {}), **_load_json(NOTES_FILE, {})}
-
-
-def store_fact(key: str, value: str, source: str = "explicit") -> tuple[bool, str]:
-    """Persists one fact, routing profile keys to profile.json.
-
-    Returns (changed, reason). Rejects identity-shaped keys and placeholder
-    values outright (quarantined, never stored) — a fact extractor calling
-    this with junk should not be able to pollute the user's memory, whether
-    the call came from the explicit 'remember' tool or the automatic
-    reflection pass.
-    """
-    normalized = _normalize_key(key)
-    value = str(value).strip()
-
-    if not normalized or not value:
-        return False, "empty key or value"
-    if _is_identity_key(normalized):
-        if source == "auto":
-            _quarantine(key, value, "identity-shaped key")
-        return False, "that's part of my own identity, not something to remember about you"
-    if source == "auto" and is_transcript_key(normalized):
-        # The extractor echoed the raw exchange back as if it were a fact
-        # (e.g. {"user_message": "...", "assistant_reply": "..."}) — that's
-        # a transcript, not a durable fact, no matter what it's filed under.
-        _quarantine(key, value, "transcript-shaped key, not a fact")
-        return False, "that's a copy of the conversation, not a fact to remember"
-    if is_self_referential_value(value):
-        if source == "auto":
-            _quarantine(key, value, "self-referential value under a generic key")
-        return False, "that describes me, not you — not something to remember about you"
-    if _is_placeholder(value):
-        if source == "auto":
-            _quarantine(key, value, "placeholder value")
-        return False, "placeholder value, nothing to store"
-
-    path = PROFILE_FILE if normalized in PROFILE_KEYS else NOTES_FILE
-    data = _load_json(path, {})
-    existing = data.get(normalized)
-    if existing == value:
-        return False, "already stored"
-    if existing and _is_placeholder(existing) is False and source == "auto" and len(value) < 2:
-        # An auto-extracted value that's suspiciously short shouldn't clobber
-        # a real existing value (e.g. don't let a guess overwrite a name).
-        _quarantine(key, value, f"too short to override existing '{existing}'")
-        return False, "kept existing value"
-
-    data[normalized] = value
-    _save_json(path, data)
-    return True, "stored"
-
-
-def load_sessions(n: int = SESSIONS_IN_PROMPT) -> list[str]:
-    """The n most recent session summaries, oldest first."""
-    sessions = _load_json(SESSIONS_FILE, [])
-    return [s["summary"] for s in sessions[-n:]]
-
-
-def add_session_summary(summary: str) -> None:
-    summary = summary.strip()
-    if not summary:
+def _migrate_legacy_json(mem_store):
+    legacy_dir = os.path.join(DB_DIR, "legacy-json.bak")
+    profile_path = os.path.join(DB_DIR, "user", "profile.json")
+    notes_path = os.path.join(DB_DIR, "user", "notes.json")
+    lessons_path = os.path.join(DB_DIR, "agent", "lessons.json")
+    quarantine_path = os.path.join(DB_DIR, "quarantine.json")
+    sessions_path = os.path.join(DB_DIR, "sessions", "log.json")
+    
+    # Check if we have legacy data to migrate
+    has_legacy = any(os.path.exists(p) for p in (profile_path, notes_path, lessons_path, quarantine_path, sessions_path))
+    if not has_legacy:
         return
-    sessions = _load_json(SESSIONS_FILE, [])
-    sessions.append({"ts": datetime.now().strftime("%Y-%m-%d %H:%M"), "summary": summary})
-    _save_json(SESSIONS_FILE, sessions[-MAX_SESSIONS_KEPT:])
+        
+    os.makedirs(legacy_dir, exist_ok=True)
+    
+    # 1. Profile facts
+    if os.path.exists(profile_path):
+        try:
+            with open(profile_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        mem_store.remember(k, str(v), source="import")
+        except Exception as e:
+            print(f"Error migrating profile: {e}")
+            
+    # 2. Notes facts
+    if os.path.exists(notes_path):
+        try:
+            with open(notes_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        mem_store.remember(k, str(v), source="import")
+        except Exception as e:
+            print(f"Error migrating notes: {e}")
+            
+    # 3. Lessons
+    if os.path.exists(lessons_path):
+        try:
+            with open(lessons_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    for lesson in data:
+                        mem_store.add_lesson(str(lesson))
+        except Exception as e:
+            print(f"Error migrating lessons: {e}")
 
+    # Move files to backup
+    for p in (profile_path, notes_path, lessons_path, quarantine_path, sessions_path):
+        if os.path.exists(p):
+            try:
+                dest = os.path.join(legacy_dir, os.path.basename(p))
+                if os.path.dirname(p).endswith("user") or os.path.dirname(p).endswith("agent") or os.path.dirname(p).endswith("sessions"):
+                    subdir = os.path.basename(os.path.dirname(p))
+                    dest = os.path.join(legacy_dir, f"{subdir}_{os.path.basename(p)}")
+                shutil.move(p, dest)
+            except Exception as e:
+                print(f"Error moving {p} to backup: {e}")
 
-def load_lessons() -> list[str]:
-    return _load_json(LESSONS_FILE, [])
-
-
-def add_lesson(lesson: str) -> None:
-    """Appends one operational lesson, deduplicated, capped at MAX_LESSONS
-    (oldest dropped first)."""
-    lesson = lesson.strip()
-    if not lesson:
-        return
-    lessons = _load_json(LESSONS_FILE, [])
-    if lesson in lessons:
-        return
-    lessons.append(lesson)
-    _save_json(LESSONS_FILE, lessons[-MAX_LESSONS:])
-
-
-def load_quarantine(n: int = 20) -> list[dict]:
-    """Rejected extraction attempts, for Ray-mode debugging only — never
-    injected into the prompt."""
-    return _load_json(QUARANTINE_FILE, [])[-n:]
-
-
-def clear_memory() -> None:
-    for path in (PROFILE_FILE, NOTES_FILE, SESSIONS_FILE, LESSONS_FILE, QUARANTINE_FILE):
-        if os.path.exists(path):
-            os.remove(path)
-
-
-_EXTRACT_SYSTEM_PROMPT = (
-    "You extract durable facts ABOUT THE USER ONLY from one chat exchange — "
-    "never facts about the assistant itself (its name, model, role, or "
-    "purpose are off-limits, no matter how they're phrased), and never the "
-    "exchange itself. Valid examples: the user's name, preferences, location, "
-    "occupation, interests, plans, or corrections they made about THEMSELVES. "
-    "INVALID, never do this: keys like 'user_message', 'assistant_reply', "
-    "'user_said', 'conversation' — copying what either side said is not a "
-    "fact. Output ONLY a flat JSON object of snake_case keys to short string "
-    "values, e.g. {\"favorite_color\": \"blue\"}. If the exchange contains no "
-    "durable fact about the user, output exactly NONE. Never invent facts, "
-    "never echo the "
-    "raw exchange back as a fact, never store facts about the assistant."
+# Initialize singleton store. 4096 matches today's default local model
+# (src/models/configs/local.py); attach_llm() below corrects this to the
+# real model card the moment a session picks one, and switch_model() keeps
+# it correct across model switches (see reconfigure_for_model()).
+mem = elastimem.open(
+    DB_PATH,
+    context_tokens=4096,
+    reserved_keys=frozenset(RESERVED_IDENTITY_KEYS),
 )
 
+if is_new_db:
+    _migrate_legacy_json(mem)
 
-# Set TUFFY_NO_AUTO_MEMORY=1 to disable the reflection pass entirely — on a
-# memory/thermal-constrained machine, this is one full extra LLM completion
-# per turn, purely for a "nice to have." The 'remember' tool still works.
-_AUTO_MEMORY_DISABLED = os.environ.get("TUFFY_NO_AUTO_MEMORY") == "1"
+def _adapt(agent_complete):
+    def llm(prompt, *, max_tokens, temperature):
+        r = agent_complete(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=temperature
+        )
+        return r["choices"][0]["message"]["content"]
+    return llm
 
-# Below this many words, an exchange essentially never contains a new
-# personal fact ("hi", "thanks", "ok", tool-result acknowledgements) — skip
-# the extraction completion outright instead of spending GPU time on turns
-# that were always going to come back NONE.
-_MIN_WORDS_FOR_EXTRACTION = 4
+def attach_llm(complete_fn):
+    if os.environ.get("TUFFY_NO_AUTO_MEMORY") == "1":
+        return
+    mem.complete_fn = _adapt(complete_fn)
 
+def reconfigure_for_model(model_card: dict, static_prompt_tokens: int = None) -> None:
+    """Rebuilds memory's token budgets for the given model card's real
+    context length (and, when known, the fixed size of the persona/tools
+    portion of the system prompt). Call this whenever the active model
+    changes (initial load and every /models switch) - without it, budgets
+    silently stay pinned to whatever context_tokens was set at import time
+    (4096) even after switching to e.g. a 131k-context API model. See
+    elastimem's docs/integration.md ("If your host can switch models
+    mid-session") for why this isn't automatic."""
+    context_length = model_card.get("context_length") or 4096
+    overrides = {"context_tokens": context_length}
+    if static_prompt_tokens is not None:
+        overrides["static_prompt_tokens"] = static_prompt_tokens
+    mem.reconfigure(**overrides)
+
+# --- Re-export legacy API ---
+
+def load_memory() -> dict:
+    return mem.facts()
+
+def store_fact(key: str, value: str, source: str = "explicit") -> tuple[bool, str]:
+    return mem.remember(key, value, source)
+
+def load_sessions(n: int = 3) -> list[str]:
+    # Recent session summaries, oldest first
+    return [s["summary"] for s in mem.sessions(n) if s.get("summary")][::-1]
+
+def add_session_summary(summary: str) -> None:
+    # No-op since session summaries are now generated by mem.end_session()
+    pass
+
+def load_lessons() -> list[str]:
+    return mem.lessons()
+
+def add_lesson(lesson: str) -> None:
+    mem.add_lesson(lesson)
+
+def load_quarantine(n: int = 20) -> list[dict]:
+    return mem.quarantine_entries(n)
+
+def clear_memory() -> None:
+    """Closes, archives the DB file, and opens a fresh memory database."""
+    global mem
+    mem.close()
+    if os.path.exists(DB_PATH):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = os.path.join(DB_DIR, "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        archive_path = os.path.join(backup_dir, f"tuffy.db.{timestamp}.bak")
+        try:
+            os.rename(DB_PATH, archive_path)
+            print(f"Archived memory database to {archive_path}")
+        except Exception as e:
+            print(f"Error archiving memory database: {e}")
+            try:
+                os.remove(DB_PATH)
+            except Exception:
+                pass
+    mem = elastimem.open(
+        DB_PATH,
+        context_tokens=4096,
+        reserved_keys=frozenset(RESERVED_IDENTITY_KEYS),
+    )
 
 def extract_facts(complete_fn, user_text: str, assistant_text: str) -> dict:
-    """Reflection pass: asks the model (via complete_fn, a create_chat_completion
-    -compatible callable) whether the last exchange contained durable facts
-    about the user, validates and stores any it finds, and returns the newly
-    stored {key: value} pairs. Rejected candidates are quarantined, not
-    silently dropped, so misbehavior stays inspectable.
-
-    Skips the LLM call entirely (no cost) for disabled/trivially short turns
-    — see _AUTO_MEMORY_DISABLED and _MIN_WORDS_FOR_EXTRACTION above.
-    """
-    if _AUTO_MEMORY_DISABLED or len(user_text.split()) < _MIN_WORDS_FOR_EXTRACTION:
-        return {}
-    try:
-        result = complete_fn(
-            messages=[
-                {"role": "system", "content": _EXTRACT_SYSTEM_PROMPT},
-                {"role": "user", "content": f"User said: {user_text}\nAssistant replied: {assistant_text[:400]}"},
-            ],
-            max_tokens=64,
-            temperature=0.0,
-        )
-        text = result["choices"][0]["message"]["content"].strip()
-        if not text or text.upper().startswith("NONE"):
-            return {}
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if not match:
-            return {}
-        facts = json.loads(match.group(0))
-        if not isinstance(facts, dict):
-            return {}
-        stored = {}
-        for key, value in facts.items():
-            if not isinstance(value, (str, int, float)):
-                continue
-            changed, _ = store_fact(str(key), str(value), source="auto")
-            if changed:
-                stored[_normalize_key(str(key))] = str(value).strip()
-        return stored
-    except Exception:
-        return {}  # memory extraction must never break the chat
-
+    # No-op: handled in background by record_turn
+    return {}
 
 def summarize_session(complete_fn, messages: list) -> str:
-    """Builds a 1-2 sentence summary of this session's conversation for
-    episodic memory. Returns '' when there's nothing worth remembering."""
-    user_turns = [
-        m["content"] for m in messages
-        if m["role"] == "user" and isinstance(m["content"], str)
-    ]
-    if len(user_turns) < 2:
-        return ""
-    try:
-        transcript = "\n".join(f"- {t[:160]}" for t in user_turns[-12:])
-        result = complete_fn(
-            messages=[
-                {"role": "system", "content": (
-                    "Summarize what the user talked about and wanted in this chat "
-                    "session in 1-2 short plain sentences, past tense. Output only "
-                    "the summary."
-                )},
-                {"role": "user", "content": transcript},
-            ],
-            max_tokens=80,
-            temperature=0.0,
-        )
-        return result["choices"][0]["message"]["content"].strip()
-    except Exception:
-        return ""
+    # No-op: handled by end_session
+    return ""
 
+# --- Register tools ---
 
 @registry.register(
     name="remember",
@@ -311,3 +191,21 @@ def remember(key: str, value: str) -> str:
     if changed:
         return f"Stored '{key}' = '{value}' in long-term memory."
     return f"Didn't store it: {reason}."
+
+@registry.register(
+    name="memory_search",
+    description="Search past conversations and facts in long-term memory for relevant information.",
+    parameters={
+        "query": {"type": "string", "description": "Search query."}
+    },
+    required=["query"],
+    group="memory",
+)
+def memory_search(query: str) -> str:
+    hits = mem.recall(query)
+    if not hits:
+        return "nothing found"
+    lines = []
+    for hit in hits:
+        lines.append(f"- [{hit.date}] {hit.text}")
+    return "\n".join(lines)
