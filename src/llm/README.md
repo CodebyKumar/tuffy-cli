@@ -1,8 +1,9 @@
 # src/llm/
 
-LLM provider adapters. `src/agent.py`'s ReAct loop never talks to `llama_cpp` or an HTTP client
-directly — it only ever calls `provider.stream_completion(...)` / `provider.complete(...)`
-through the interface defined here, so swapping or adding a backend never touches the agent loop.
+LLM provider adapters. `src/engine/turn_engine.py`'s ReAct loop never talks to `llama_cpp` or an
+HTTP client directly — it only ever calls `provider.stream_completion(...)` /
+`provider.complete(...)` through the interface defined here, so swapping or adding a backend
+never touches the turn engine.
 
 - [base.py](base.py) - `LLMProvider`, the abstract interface: `load()`/`unload()` lifecycle
   hooks and `complete()`/`stream_completion()`, both shaped like llama.cpp's own
@@ -14,7 +15,8 @@ through the interface defined here, so swapping or adding a backend never touche
   any OpenAI-wire-format HTTP endpoint (OpenAI, Groq, Together, OpenRouter, a local vLLM/Ollama
   server, ...) via `base_url` + `api_key_env` + `model_name` from the model card.
 - [__init__.py](__init__.py) - `PROVIDERS` (provider name → adapter class) and
-  `build_provider(model_card)`, which [src/agent.py](../agent.py) calls once per model load.
+  `build_provider(model_card)`, which [src/engine/model_agent.py](../engine/model_agent.py)'s
+  `ModelAgent` calls once per model load.
 
 ## Adding a new provider
 
@@ -26,7 +28,7 @@ through the interface defined here, so swapping or adding a backend never touche
    `configs/<name>.py`, imported from [models/__init__.py](../models/__init__.py)) with that
    `provider` value and a `provider_config` dict of whatever your adapter's `__init__` needs.
 
-No changes to `src/agent.py`, `main.py`, or the tool/prompt/memory systems are ever required —
+No changes to `src/engine/`, `main.py`, or the tool/prompt/memory systems are ever required —
 they only see the model card's `provider` field and this interface.
 
 ## API keys

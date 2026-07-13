@@ -10,11 +10,12 @@ off to this package for the actual input loop.
   history-trimming rules (`trim_history`, `compact_turn`, `keep_only_latest_image`) that keep
   the rolling conversation under the model's context budget.
 - [commands.py](commands.py) - one `cmd_*` function per slash command (`/help`, `/new`,
-  `/clear`, `/memory`, `/status`, `/models`, `/image`, `/tools`, `/skills`) plus
-  `handle_command()`, the dispatch table `main.py`'s input loop calls.
-- [turn.py](turn.py) - `run_turn()`: builds the message list for one user turn, streams the
-  agent's reply token-by-token through the spinner, and folds tool-call intermediates back out
-  of history once the turn completes.
+  `/clear`, `/purge`, `/memory`, `/status`, `/models` (including `/models default`), `/image`,
+  `/tools`, `/skills`) plus `handle_command()`, the dispatch table `main.py`'s input loop calls.
+- [turn.py](turn.py) - `run_turn()`: builds the message list for one user turn, drives
+  `src.engine.turn_engine.run_turn()`, and renders each `TurnEvent` as it arrives (spinner label,
+  trace lines, live answer tokens) before folding tool-call intermediates back out of history
+  once the turn completes.
 
 ## Adding a new slash command
 
@@ -28,6 +29,6 @@ command function.
 
 ## Why this is split out
 
-Nothing in this package is imported by `src/agent.py` or the tool/model/skill registries —
+Nothing in this package is imported by `src/engine/` or the tool/model/skill registries —
 only `main.py` reaches into it. That keeps the agent core and its registries usable headless
 (e.g. a future web or API frontend) without dragging in `print()`/`input()` terminal code.

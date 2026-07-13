@@ -30,16 +30,16 @@ tool), see [docs/](docs/). For a plain per-folder file listing, see [src/README.
                      │                     │                     │
                      ▼                     ▼                     ▼
            ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-           │   Prompt build     │  │   Agent (ReAct)    │  │   Session state    │
-           │  src/prompts/      │  │   loop             │  │   src/cli/session   │
-           │                    │  │   src/agent.py      │  │                    │
+           │   Prompt build     │  │   Turn engine       │  │   Session state    │
+           │  src/prompts/      │  │   (ReAct loop)      │  │   src/cli/session   │
+           │                    │  │   src/engine/        │  │                    │
            └─────────┬──────────┘  └─────────┬──────────┘  └────────────────────┘
                      │                       │
         ┌────────────┼───────────┐           │
         ▼            ▼           ▼           ▼
  ┌────────────┐ ┌───────────┐ ┌────────┐ ┌────────────────┐
  │  identity   │ │  memory    │ │ skills  │ │  LLM provider    │
- │  (fixed)    │ │  (learned) │ │ loader  │ │  src/llm/         │
+ │  (fixed)    │ │  (Elastimem)│ │ loader  │ │  src/llm/         │
  └────────────┘ └───────────┘ └────┬───┘ └────────┬─────────┘
                                     │              │
                                     ▼              ▼
@@ -69,21 +69,23 @@ schema shape, same dispatch call (`registry.functions[name](**args)`).
 
 1. **One interface per swappable axis.** The LLM backend (`LLMProvider`), the tool surface
    (`ToolRegistry`), and the capability-extension mechanisms (skills, MCP) are each behind a
-   single seam. The ReAct loop in `src/agent.py` never branches on "which backend" or "which
-   kind of tool" — it only calls the interface.
+   single seam. The ReAct loop in `src/engine/turn_engine.py` never branches on "which backend"
+   or "which kind of tool" — it only calls the interface.
 2. **All tools always visible.** There is no runtime mode-switching or per-task tool filtering.
    Every registered tool (native, MCP, or skill-provided) is offered to the model every turn.
    `group` is display metadata only — used for `/tools` output and system-prompt section
    headers — never for hiding a tool.
 3. **Identity is fixed; memory is learned.** `src/identity.py` (what the agent *is*: name,
    active model, capabilities) is code-owned and never written by an LLM reflection pass.
-   `src/memory.py` (what the agent has *learned about the user*) is the only part of the system
-   prompt an LLM pass can write to, and it runs through a validation boundary that actively
-   rejects identity-shaped keys and values.
+   Long-term memory (what the agent has *learned about the user*) lives in the external
+   **Elastimem** library, wired in through `src/memory.py`, and is the only part of the system
+   prompt an LLM pass can write to — Elastimem's own validation boundary rejects
+   identity-shaped keys (`RESERVED_IDENTITY_KEYS`, passed in at `elastimem.open()`) and
+   self-referential values, routing rejects to a quarantine log instead of the prompt.
 4. **The sandbox is a real boundary.** Every tool that touches the filesystem or runs code
    resolves through `safe_workspace_path()` and is scoped to `agent_workspace/` — not a
    convention, an enforced check that rejects path traversal.
-5. **Terminal I/O stays out of the core.** Nothing under `src/agent.py`, `src/llm/`,
+5. **Terminal I/O stays out of the core.** Nothing under `src/engine/`, `src/llm/`,
    `src/tools/`, `src/prompts/`, `src/skills/`, or `src/models/` calls `print()`/`input()`. Only
    `src/cli/` and `main.py` do. This keeps the agent core usable headless behind a different
    frontend later without a rewrite.
@@ -103,41 +105,49 @@ main.py's input loop ── if it starts with "/" ──▶ src/cli/commands.han
         │ (else: a normal chat message)
         ▼
 src/cli/turn.run_turn()
-        │  1. session.system_message() rebuilds the system prompt fresh
+        │  1. memory.mem.build_context() builds an Elastimem context plan for this input
+        │  2. session.system_message(context_plan=plan) rebuilds the system prompt fresh
         │     (src/prompts.build_system_prompt: identity + tools + skills +
-        │      memory + session summaries + lessons)
-        │  2. appends the user message (with an image attached, if pending)
-        │  3. trims history to fit the context budget (src/cli/session.trim_history)
+        │      memory/episodic sections + session summaries + lessons)
+        │  3. appends the user message (with an image attached, if pending)
+        │  4. trims history to fit the context budget (src/cli/session.trim_history)
         ▼
-src/agent.py — LocalAgent.run_stream() : the ReAct loop
+src/engine/turn_engine.run_turn() : the ReAct loop, as one flat generator of TurnEvents
         │
         │   for each hop (capped at _MAX_TOOL_HOPS):
-        │     stream a completion through self.provider (src/llm/*)
+        │     stream a completion through the provider (src/llm/*), parsed live by
+        │     src/engine/stream_parser.StreamParser into events
         │        │
-        │        ├─ plain text  ──▶ done: yield tokens to the terminal, return
+        │        ├─ plain text  ──▶ Done(full_text): terminal event, loop ends
         │        │
-        │        └─ <tool_call> JSON ──▶ parse → registry.functions[name](**args)
+        │        └─ <tool_call> JSON ──▶ tool_dispatch.parse_tool_call() + .execute()
         │                                       │
         │                                       ▼
-        │                              Observation appended as a synthetic
-        │                              "user" turn (templates.tool_output_prompt)
+        │                              ToolResult event; Observation appended as a
+        │                              synthetic "user" turn (templates.tool_output_prompt)
         │                                       │
         │                              loop back to the top of the hop
         ▼
-Final answer streamed to the terminal
+src/cli/turn._TurnRenderer renders each event live (spinner label, [thought]/[execute]/[result]
+trace lines, streamed answer tokens) as src/cli/turn.py iterates the generator
         │
         ▼
 src/cli/turn.py post-processing
         │  - compact_turn(): drops this turn's tool-call/observation
         │    intermediates from history (the final answer already carries
         │    what they contributed)
-        │  - extract_facts(): a validated reflection pass that may write
-        │    new facts to src/memory.py (never to src/identity.py)
+        │  - memory.mem.record_turn(): hands the turn to Elastimem, which runs a
+        │    validated background reflection pass that may write new facts
+        │    (never to src/identity.py)
 ```
 
-A **foreign-script guard** in `src/agent.py` intercepts non-Latin text the model hand-writes
-(unreliable output at small model sizes) mid-stream and re-routes the turn through the
-`translate` tool instead of showing unreliable text.
+A **foreign-script guard** in `src/engine/turn_engine.py` (via `stream_parser`) intercepts
+non-Latin text the model hand-writes (unreliable output at small model sizes) mid-stream and
+re-routes the turn through the `translate` tool instead of showing unreliable text. A
+**degenerate-reply guard** catches a small model's draft answer collapsing into a leaked
+chat-role word (e.g. a bare `"user"`) or going empty, and retries instead of showing or saving
+garbage; the last hop instead forces one guaranteed final completion
+(`_final_answer_guaranteed`) rather than looping forever.
 
 ### 2.2 Component contracts
 
@@ -157,6 +167,15 @@ vision/multimodal path) and `openai_compatible_provider.py` (any HTTP endpoint s
 OpenAI chat-completions wire format — this covers most hosted and self-hosted API servers with
 no per-provider code). Adding a new backend means writing one more adapter file; the ReAct loop,
 tool dispatch, and prompts never change.
+
+**Turn engine** (`src/engine/`) — the ReAct loop itself, expressed as one flat generator of typed
+`TurnEvent`s (`events.py`) rather than live-yielded tokens plus a final classification value plus
+side-channel callbacks. `turn_engine.run_turn(provider, sampling_params, messages)` is the entry
+point; `stream_parser.StreamParser` turns raw text deltas into events (separating `<think>`
+blocks, `<tool_call>` JSON, and answer tokens); `tool_dispatch.py` parses and executes tool calls
+against `ToolRegistry`; `model_agent.ModelAgent` wraps one `LLMProvider`'s load/unload lifecycle.
+Nothing in `src/engine/` imports `src/cli/` — only `src/cli/turn.py` iterates it and renders
+events to the terminal.
 
 **`ToolRegistry`** (`src/tools/registry.py`) — the only seam between the ReAct loop and any
 callable capability:
@@ -187,10 +206,14 @@ and API models (`provider` field selects the adapter; `provider_config` holds AP
 like `base_url`/`api_key_env`). `/models` and the switch logic never branch on provider — only
 the adapter constructed from the card does.
 
-**Memory** (`src/memory.py`) — three write paths (the `remember` tool, a post-turn reflection
-pass, and session/lesson logging on exit), one validation boundary: `store_fact()` rejects
-identity-shaped keys (`RESERVED_IDENTITY_KEYS`) and self-referential values
-(`is_self_referential_value()`), routing rejects to `quarantine.json` instead of the prompt.
+**Memory** (`src/memory.py`) — a thin adapter wrapping the external **Elastimem** library (a
+SQLite-backed facts/episodic/lessons store, `data/memory/tuffy.db`). Two write paths funnel
+through it: the `remember`/`recall` tools, and Elastimem's own background worker (fact
+extraction, session summarization) fed by `attach_llm()`. `reconfigure_for_model()` must be
+called on every model load/switch so Elastimem's context-token budgets track the active model's
+real `context_length` instead of staying pinned to the import-time default; `clear_memory()`
+(behind `/purge`) archives the DB file and re-attaches the LLM and budgets to a fresh store. See
+[data/README.md](data/README.md) for the memory-tier/governor details.
 
 **Identity** (`src/identity.py`) — the opposite of memory: fixed, code-owned, rendered fresh
 into every system prompt from the *currently active* model card (so it's always accurate after
@@ -205,7 +228,7 @@ a `/models` switch), and structurally incapable of being written by the reflecti
 | `display.py` | ANSI colors, the startup logo, the animated status spinner. Pure rendering. |
 | `session.py` | `Session` — the active model/agent handle, chat history, history-trimming rules. |
 | `commands.py` | One function per slash command + the dispatch table `main.py` calls. |
-| `turn.py` | Drives one user turn: builds messages, streams tokens, folds history back together. |
+| `turn.py` | Drives one user turn: builds messages, iterates `src.engine.turn_engine.run_turn()`, renders each `TurnEvent` (spinner/trace/tokens), folds history back together. |
 
 `main.py` itself only does two things: startup wiring (skill discovery, MCP connection) and the
 top-level input loop (read a line, dispatch to a command or a chat turn).
@@ -218,9 +241,16 @@ top-level input loop (read a line, dispatch to a command or a chat turn).
 main.py                  Entry point: startup wiring, then the input loop
 src/
   cli/                   Terminal chat layer (display, session, commands, turn) — §2.3
-  agent.py               The ReAct loop itself — §2.1
+  engine/                The ReAct loop itself — §2.1, §2.2
+    turn_engine.py          run_turn() — the loop, as a flat generator of TurnEvents
+    events.py               Typed events (Status/Thought/ToolCall/ToolResult/Token/Done/Failed)
+    stream_parser.py         Raw completion deltas -> events (<think>/<tool_call>/answer split)
+    tool_dispatch.py          Parses + executes <tool_call> JSON against ToolRegistry
+    model_agent.py             ModelAgent — provider load/unload lifecycle, no ReAct logic
+    errors.py                  OutOfMemoryError, ToolExecutionError
   identity.py             Fixed self-model — §2.2
-  memory.py              Learned long-term memory — §2.2
+  memory.py              Elastimem adapter: learned long-term memory — §2.2
+  settings.py            Persisted user settings (.tuffy/settings.json) — default model id
   vision.py               Image encoding + the IMAGE_SENTINEL hand-off protocol
   llm/
     base.py                LLMProvider interface — §2.2
@@ -250,8 +280,9 @@ src/
 .tuffy/
   skills/                 Droppable skill packs (content; the mechanism lives in src/skills/)
   mcp.json                MCP server config (gitignored)
+  settings.json            Persisted user settings (gitignored) — e.g. the default model id
 docs/                     Configuration how-tos (models, MCP, skills, tools, CLI reference)
-data/memory/              JSON-backed long-term memory store
+data/memory/              Elastimem's SQLite-backed long-term memory store (tuffy.db) + backups/
 agent_workspace/          Sandboxed file I/O root every file/code tool is scoped to
 ```
 

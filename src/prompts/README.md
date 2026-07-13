@@ -1,6 +1,6 @@
 # src/prompts/
 
-Every system-prompt string, centralized. `src/agent.py` and `main.py` only ever call
+Every system-prompt string, centralized. `src/engine/` and `main.py` only ever call
 `build_system_prompt()` or a `templates.*` function from this package — neither constructs or
 holds a raw prompt string itself.
 
@@ -10,7 +10,7 @@ holds a raw prompt string itself.
 - [templates.py](templates.py) - Python-built prompt fragments: `self_model()` (identity +
   capabilities, sourced from [src/identity.py](../identity.py)), `runtime_context()` (tool
   signatures, memory, session summaries, lessons, skills list), the generic ReAct examples, and
-  the tool-output/error framing strings the agent loop appends mid-turn.
+  the tool-output/error framing strings the turn engine appends mid-turn.
 - [__init__.py](__init__.py) - `load_preset()` + `build_system_prompt()`, which stitches a
   persona preset, the self-model, and the runtime context into the final system prompt string.
 
@@ -25,5 +25,6 @@ new examples generic for the same reason.
 ## Adding a new prompt fragment
 
 Write a function in `templates.py` that returns a string, and call it from `build_system_prompt()`
-or from wherever in `src/agent.py` needs to inject it mid-conversation (e.g. `tool_output_prompt`,
-`force_final_answer`). Never inline a prompt string directly in `src/agent.py`.
+or from wherever in `src/engine/turn_engine.py` needs to inject it mid-conversation (e.g.
+`tool_output_prompt`, `force_final_answer`). Never inline a prompt string directly in
+`src/engine/`.

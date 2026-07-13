@@ -30,8 +30,9 @@ MCP servers, skills, tools). Most folders below have their own README with more 
   instead of one flat list; `/status` shows the active model and session state at a glance.
 - **Clean chat with live traces**: colored step-by-step traces show thoughts, tool calls, and
   responses as they happen, with an animated status spinner while the agent works.
-- **Synchronous memory**: Fact extraction and session summary storage run synchronously on turn
-  completions, avoiding background threads and memory spikes.
+- **Elastimem-backed memory**: a SQLite-backed store with facts, episodic recall, session
+  summaries, and lessons learned, extracted by a background worker gated to stay off the
+  foreground reply path. See [data/README.md](data/README.md).
 
 ---
 
@@ -42,11 +43,13 @@ Run `/help` inside Tuffy for the full categorized list, or see
 
 **Chat**
 - `/new` - Start a fresh conversation, keeping long-term memory intact.
-- `/clear` - Wipe long-term memory AND the conversation history.
+- `/clear` - Reset the conversation history (long-term memory is untouched — same as `/new`).
+- `/purge` - Wipe long-term memory: archives the memory database and starts a fresh one.
 - `/image <path>` - Attach an image file to your next message (requires a vision model).
 
 **Inspect**
-- `/memory` - Show everything in long-term memory (facts about you, recent sessions, lessons learned).
+- `/memory` - Show a summary of long-term memory (facts about you, recent sessions, lessons learned).
+- `/memory search <query>` - Search past conversations and stored facts.
 - `/tools` - List all tools the agent can call, grouped by domain.
 - `/skills` - List installed skills (drop new ones in `./.tuffy/skills/<name>/`).
 - `/mcp` - List connected MCP servers and the tools they registered.
@@ -55,6 +58,7 @@ Run `/help` inside Tuffy for the full categorized list, or see
 **Models**
 - `/models` - List available models (local and API) and show which one is active.
 - `/models <id>` - Switch to a different model (local or API), unloading the current one.
+- `/models default <id>` - Switch to a model and persist it as the startup default.
 - `/models info <id>` - Show a model's full model card, including provider/API details.
 
 **Session**
@@ -142,9 +146,10 @@ Re-run it any time after pulling new dependencies or model weights — it's idem
 main.py                 Entry point: startup wiring (skills/MCP discovery), then the input loop
 src/
   cli/                  Interactive terminal chat: banner, spinner, slash commands, turn loop
-  agent.py              LocalAgent — the provider-agnostic ReAct tool-calling loop
+  engine/               Provider-agnostic ReAct tool-calling loop (turn_engine, stream_parser, tool_dispatch)
   identity.py           Fixed self-model (name, capabilities) — never LLM-written
-  memory.py             Long-term memory (profile/notes/sessions/lessons) + the `remember` tool
+  memory.py             Elastimem-backed long-term memory (facts/episodic/lessons) + the `remember`/`recall` tools
+  settings.py           Persisted user settings (.tuffy/settings.json) — default model id
   vision.py              Image encoding + IMAGE_SENTINEL protocol for vision tool results
   llm/                   Model-provider interface + adapters (local weights, OpenAI-compatible API)
   models/                Model registry; configs/local.py + configs/api.py hold model cards; weights/ holds gitignored model weight files
