@@ -57,6 +57,36 @@ class TestParseToolCall:
         with pytest.raises(ToolExecutionError):
             tool_dispatch.parse_tool_call('{"name": "tool_name", "arguments": {}}')
 
+    def test_empty_payload_gives_actionable_error(self):
+        """Regression test: a truncated <tool_call> (closing tag never
+        generated) used to surface as 'not valid JSON (Expecting value:
+        line 1 column 1 (char 0))' — meaningless to the model reading it as
+        an Observation. The error must restate the expected format."""
+        with pytest.raises(ToolExecutionError) as exc_info:
+            tool_dispatch.parse_tool_call("")
+        assert "expected exactly" in str(exc_info.value)
+
+    def test_json_surrounded_by_chatter_still_parses(self):
+        """Small models wrap the JSON in prefix/suffix text — as long as one
+        parseable object is in there, the call must run."""
+        name, args, thought = tool_dispatch.parse_tool_call(
+            'Sure, let me search:\n{"name": "web_search", "arguments": {"query": "mumbai"}}\nrunning now'
+        )
+        assert name == "web_search"
+        assert args == {"query": "mumbai"}
+
+    def test_truncated_tail_after_complete_object_still_parses(self):
+        # e.g. the stream-parser fallback hands over "…object…\n</tool_ca"
+        name, args, _ = tool_dispatch.parse_tool_call(
+            '{"name": "web_search", "arguments": {"query": "mumbai"}}\n</tool_ca'
+        )
+        assert name == "web_search"
+
+    def test_non_dict_arguments_rejected_with_format_hint(self):
+        with pytest.raises(ToolExecutionError) as exc_info:
+            tool_dispatch.parse_tool_call('{"name": "web_search", "arguments": "mumbai"}')
+        assert "expected exactly" in str(exc_info.value)
+
 
 class TestExecute:
     def test_unknown_tool_raises_tool_execution_error(self, clean_registry):

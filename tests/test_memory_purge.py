@@ -27,6 +27,8 @@ def isolated_memory(monkeypatch, tmp_path):
     import elastimem
     memory_module.mem = elastimem.open(memory_module.DB_PATH, context_tokens=4096)
     memory_module._last_complete_fn = None
+    memory_module._last_model_card = None
+    memory_module._last_static_prompt_tokens = None
     yield memory_module
     memory_module.mem.close()
 
@@ -57,3 +59,31 @@ def test_purge_without_prior_attach_does_not_crash(isolated_memory):
     # clear_memory() must tolerate _last_complete_fn being None.
     memory.clear_memory()
     assert memory.mem is not None
+
+
+def test_purge_reapplies_real_model_context_budget(isolated_memory):
+    """Regression test: clear_memory() used to always reopen the fresh store
+    at the hardcoded 4096-token default, silently re-budgeting a large-
+    context model's memory sections down to a fraction of what they should
+    be until the next /models switch happened to fix it. clear_memory() must
+    re-derive the real budget from the last-known model card, the same way
+    a model switch does."""
+    memory = isolated_memory
+    large_context_card = {"id": "big-model", "context_length": 131072}
+    memory.reconfigure_for_model(large_context_card, static_prompt_tokens=500)
+    assert memory.mem.config.context_tokens == 131072
+
+    memory.clear_memory()
+
+    assert memory.mem.config.context_tokens == 131072, (
+        "clear_memory() must re-apply the real model's context length, not "
+        "silently fall back to the 4096-token default"
+    )
+
+
+def test_purge_without_any_model_card_falls_back_to_default(isolated_memory):
+    memory = isolated_memory
+    # No reconfigure_for_model() call yet (shouldn't happen in practice -
+    # main.py always calls it at startup - but must not crash).
+    memory.clear_memory()
+    assert memory.mem.config.context_tokens == 4096

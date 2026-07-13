@@ -72,6 +72,15 @@ def run_turn(provider, sampling_params: dict, messages: list):
     turn_tool_outputs = []
     failed_tools = {}
     seen_calls = set()
+    # name -> most recent successful output, for the "you already called
+    # this tool once" nudge below. Separate from seen_calls (which is keyed
+    # on the FULL signature including arguments) - a model reflexively
+    # re-running the same tool with slightly different arguments (a
+    # reworded search query, a different-but-equivalent parameter) sails
+    # right past the exact-signature guard even though it's just as
+    # pointless as a literal repeat, since the first result usually already
+    # answers the question.
+    tool_last_output: dict[str, str] = {}
 
     try:
         for hop in range(_MAX_TOOL_HOPS):
@@ -130,7 +139,17 @@ def run_turn(provider, sampling_params: dict, messages: list):
                     return
                 continue
 
-            yield Status(thought or f"using {function_name}")
+            # Not an exact repeat (that's blocked above), but the same tool
+            # NAME already ran this turn with different arguments - a
+            # genuinely different second use is legitimate (two different
+            # searches, a different offset), so the call still runs; it's
+            # only reminded, via the Observation appended after execution
+            # below, what the first call already returned - so it can't
+            # "forget" the first result and treat a near-duplicate call as
+            # if nothing had happened.
+            already_called_reminder = tool_last_output.get(function_name)
+
+            yield Status(f"using {function_name}")
             try:
                 tool_events, tool_output = tool_dispatch.execute(function_name, function_args, thought)
             except ToolExecutionError as e:
@@ -145,6 +164,7 @@ def run_turn(provider, sampling_params: dict, messages: list):
                 yield event
 
             seen_calls.add(signature)
+            tool_last_output[function_name] = tool_output
             turn_tool_outputs.append(tool_output)
             if function_name in failed_tools:
                 add_lesson(
@@ -152,10 +172,15 @@ def run_turn(provider, sampling_params: dict, messages: list):
                     f"({failed_tools.pop(function_name)[:120]}); corrected call worked"
                 )
 
+            reminder_prefix = (
+                templates.same_tool_called_again_prefix(function_name, already_called_reminder)
+                if already_called_reminder is not None else ""
+            )
+
             if tool_output.startswith(IMAGE_SENTINEL):
                 image_path, _, image_data_uri = tool_output[len(IMAGE_SENTINEL):].partition("\n")
                 yield Status("analysing image")
-                next_step = templates.tool_output_prompt(
+                next_step = reminder_prefix + templates.tool_output_prompt(
                     function_name,
                     f"Image ready and attached below. Saved at: {image_path}. It is already in front of "
                     "you — look at it directly, no further tool call needed to see it.",
@@ -166,7 +191,7 @@ def run_turn(provider, sampling_params: dict, messages: list):
                 yield Status(f"reading {function_name} result")
                 messages.append({
                     "role": "user",
-                    "content": templates.tool_output_prompt(function_name, tool_output, is_last_hop),
+                    "content": reminder_prefix + templates.tool_output_prompt(function_name, tool_output, is_last_hop),
                 })
 
             if is_last_hop:

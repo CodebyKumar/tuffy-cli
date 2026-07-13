@@ -16,13 +16,18 @@ registry.register(
     # quantization, so both Qwen3-VL variants share the one Q8_0 mmproj file
     # already downloaded into the q80 subfolder.
     mmproj_path="src/models/weights/qwen3vl-2b-instruct-q80/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf",
-    context_length=4096,
+    context_length=8192,
     parameters="2B",
     license="Apache-2.0",
     source="Qwen/Qwen3-VL-2B-Instruct",
     description="Small instruction-tuned vision-language model; used as Tuffy's default local model.",
     load_params={
-        "n_ctx": 4096,
+        # Doubled from 4096: Tuffy's system prompt (persona + tool catalog)
+        # already costs ~2500-2600 tokens, leaving elastimem's memory
+        # sections (facts/episodic/sessions/lessons combined) only ~400
+        # tokens of budget at 4096 - too tight for meaningful recall on any
+        # of those sections. 8192 leaves ~4500 tokens for memory instead.
+        "n_ctx": 8192,
         # Keep n_batch small: bigger batches inflate the Metal compute buffer
         # and starve an 8GB machine into llama_decode -3 failures. The mtmd
         # helper chunks image embeddings, so images work fine at 512.
@@ -60,13 +65,18 @@ registry.register(
     path="src/models/weights/qwen3vl-2b-instruct-q80/Qwen3VL-2B-Instruct-Q8_0.gguf",
     capabilities=["text", "vision"],
     mmproj_path="src/models/weights/qwen3vl-2b-instruct-q80/mmproj-Qwen3VL-2B-Instruct-Q8_0.gguf",
-    context_length=4096,
+    context_length=8192,
     parameters="2B",
     license="Apache-2.0",
     source="Qwen/Qwen3-VL-2B-Instruct",
     description="Small instruction-tuned vision-language model; used as Tuffy's default local model.",
     load_params={
-        "n_ctx": 4096,
+        # Doubled from 4096: Tuffy's system prompt (persona + tool catalog)
+        # already costs ~2500-2600 tokens, leaving elastimem's memory
+        # sections (facts/episodic/sessions/lessons combined) only ~400
+        # tokens of budget at 4096 - too tight for meaningful recall on any
+        # of those sections. 8192 leaves ~4500 tokens for memory instead.
+        "n_ctx": 8192,
         # Keep n_batch small: bigger batches inflate the Metal compute buffer
         # and starve an 8GB machine into llama_decode -3 failures. The mtmd
         # helper chunks image embeddings, so images work fine at 512.

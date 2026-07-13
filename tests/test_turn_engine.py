@@ -96,6 +96,26 @@ class TestToolCallFlow:
         done = only(events, Done)
         assert done[0].full_text == "It's 3:00pm."
 
+    def test_tool_call_thought_is_carried_on_the_event_not_the_spinner(self, clean_registry):
+        """Regression test: the <tool_call> JSON's own "thought" field used
+        to get fed into a Status event (spinner label only) - it would flash
+        on screen for a fraction of a second as spinner text and vanish the
+        instant the next event stopped the spinner, never appearing as a
+        permanent [thought] line. It must now travel on ToolCall.thought so
+        the renderer can print it permanently, same as a <think> block."""
+        _register("get_time", lambda: "3:00pm", required=[])
+        script = [
+            '<tool_call>{"thought": "need the current time", "name": "get_time", "arguments": {}}</tool_call>',
+            "It's 3:00pm.",
+        ]
+        events, messages = run(script)
+        calls = only(events, ToolCall)
+        assert calls[0].thought == "need the current time"
+        statuses = only(events, Status)
+        assert not any(s.label == "need the current time" for s in statuses), (
+            "the tool call's thought must not be used as a transient spinner label"
+        )
+
     def test_tool_output_fed_back_as_observation(self, clean_registry):
         _register("get_time", lambda: "3:00pm", required=[])
         script = [
@@ -182,6 +202,42 @@ class TestRepeatedCallGuard:
         # Only ONE ToolResult event - the second identical call never executes.
         assert len(results) == 1
         assert calls["n"] == 1
+
+    def test_same_tool_different_args_still_runs_but_gets_reminded(self, clean_registry):
+        """Regression test: the exact-repeat guard only catches identical
+        arguments - a model reflexively re-running the same tool with
+        slightly different (but equally pointless) arguments used to sail
+        right past it and burn a hop for no new information. The call must
+        still run (a genuinely different second use of the same tool is
+        legitimate), but the Observation must remind the model what it
+        already got back from the first call."""
+        calls = {"n": 0}
+        def search(query):
+            calls["n"] += 1
+            return f"result for {query}"
+        _register("search", search, required=["query"])
+
+        script = [
+            '<tool_call>{"name": "search", "arguments": {"query": "first powerbank ever made"}}</tool_call>',
+            '<tool_call>{"name": "search", "arguments": {"query": "first power bank invented"}}</tool_call>',
+            "Final answer.",
+        ]
+        events, messages = run(script)
+        results = only(events, ToolResult)
+        # BOTH calls actually ran (different arguments, not blocked)...
+        assert len(results) == 2
+        assert calls["n"] == 2
+        # ...but the second call's Observation reminds the model it already
+        # called this tool and got a result.
+        reminders = [
+            m for m in messages
+            if m.get("role") == "user"
+            and "already called search once this turn" in m.get("content", "")
+        ]
+        assert reminders, "expected a reminder prefix on the second call's Observation"
+        assert "result for first powerbank ever made" in reminders[0]["content"], (
+            "the reminder must restate the FIRST call's actual result"
+        )
 
 
 class TestDegenerateReply:

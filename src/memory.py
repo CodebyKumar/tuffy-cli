@@ -53,7 +53,9 @@ def _adapt(agent_complete):
         return content.strip()
     return llm
 
-_last_complete_fn = None  # remembered so clear_memory() can re-wire a fresh store
+_last_complete_fn = None    # remembered so clear_memory() can re-wire a fresh store
+_last_model_card = None     # remembered so clear_memory() can re-apply real budgets
+_last_static_prompt_tokens = None
 
 
 def attach_llm(complete_fn):
@@ -81,6 +83,9 @@ def reconfigure_for_model(model_card: dict, static_prompt_tokens: int = None) ->
     pressure from the first turn - not a stale pre-load guess. No-op cost
     for API models (unloading/loading one changes credentials, not RAM), but
     harmless to call every time rather than branching on provider type."""
+    global _last_model_card, _last_static_prompt_tokens
+    _last_model_card = model_card
+    _last_static_prompt_tokens = static_prompt_tokens
     context_length = model_card.get("context_length") or 4096
     overrides = {"context_tokens": context_length}
     if static_prompt_tokens is not None:
@@ -111,9 +116,20 @@ def clear_memory() -> None:
                 os.remove(DB_PATH)
             except Exception:
                 pass
+    # A fresh store starts back at the hardcoded 4096-token default budget
+    # (same as import time) regardless of which model is actually active.
+    # Without re-deriving real budgets below, a user on a large-context model
+    # who runs /purge gets memory silently re-budgeted down to ~4K-context
+    # math — facts/episodic/sessions/lessons sections all shrink to a
+    # fraction of what they should be — until their next /models switch
+    # happens to call reconfigure_for_model() again.
+    context_tokens = (
+        (_last_model_card.get("context_length") or 4096)
+        if _last_model_card is not None else 4096
+    )
     mem = elastimem.open(
         DB_PATH,
-        context_tokens=4096,
+        context_tokens=context_tokens,
         reserved_keys=frozenset(RESERVED_IDENTITY_KEYS),
     )
     # clear_memory() swaps `mem` for a brand-new store with no complete_fn of
@@ -122,6 +138,11 @@ def clear_memory() -> None:
     # LLM until the next model switch happened to call attach_llm() again.
     if _last_complete_fn is not None:
         attach_llm(_last_complete_fn)
+    # Re-derive the rest of the budget (static_prompt_tokens, tier reprobe)
+    # the same way a real model switch would, now that the new store exists
+    # to reconfigure.
+    if _last_model_card is not None:
+        reconfigure_for_model(_last_model_card, static_prompt_tokens=_last_static_prompt_tokens)
 
 # --- Register tools ---
 
@@ -142,18 +163,25 @@ def remember(key: str, value: str) -> str:
     return f"Didn't store it: {reason}."
 
 @registry.register(
-    name="memory_search",
-    description="Search past conversations and facts in long-term memory for relevant information.",
+    name="recall",
+    description=(
+        "Search long-term memory (past conversations and stored facts) for something specific "
+        "the user is asking you to remember or bring back up — e.g. 'what do you know about me', "
+        "'did I mention my birthday', 'what did we talk about last time', or any question about "
+        "something from an earlier session that isn't already visible in the current conversation. "
+        "Don't call this for facts already stated earlier in THIS conversation (you can already see "
+        "those) or for general world knowledge (use web_search for that instead)."
+    ),
     parameters={
-        "query": {"type": "string", "description": "Search query."}
+        "query": {"type": "string", "description": "What to search for, in the user's own words — short queries work fine."}
     },
     required=["query"],
     group="memory",
 )
-def memory_search(query: str) -> str:
+def recall(query: str) -> str:
     hits = mem.recall(query)
     if not hits:
-        return "nothing found"
+        return "nothing found in long-term memory for that"
     lines = []
     for hit in hits:
         lines.append(f"- [{hit.date}] {hit.text}")

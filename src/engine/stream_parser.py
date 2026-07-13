@@ -57,10 +57,36 @@ _DEGENERATE_PREFIX_PATTERN = re.compile(
 
 _DEGENERATE_HOLDBACK_CHARS = len("assistant") + 2
 
+_WORD_CHAR = re.compile(r"\w")
+
 
 def is_degenerate_reply(text: str) -> bool:
     stripped = text.strip()
-    return not stripped or bool(_DEGENERATE_PREFIX_PATTERN.match(stripped))
+    return (
+        not stripped
+        # A reply with no word characters at all ("...", "…", "?!") is
+        # filler, not an answer. Small models sometimes emit a bare "..."
+        # and stop — and if that ever gets SAVED as an assistant turn, it
+        # poisons every later prompt (episodic retrieval re-injects
+        # "Assistant: ..." as an example the model then parrots, a
+        # self-reinforcing loop observed in practice). Treat it exactly
+        # like an empty reply: suppress and retry.
+        or not _WORD_CHAR.search(stripped)
+        or bool(_DEGENERATE_PREFIX_PATTERN.match(stripped))
+    )
+
+
+def strip_leading_filler_lines(text: str) -> str:
+    """Drops leading lines that contain no word characters (a bare '...'
+    or '…' the model emits before its real answer). Only whole lines are
+    dropped — inline punctuation inside a real sentence is untouched."""
+    while "\n" in text:
+        first, rest = text.split("\n", 1)
+        if first.strip() and not _WORD_CHAR.search(first):
+            text = rest.lstrip("\n")
+        else:
+            break
+    return text
 
 
 @dataclass
@@ -100,6 +126,11 @@ class StreamParser:
             return
         if not self._flushed_anything:
             self._pending_start += text
+            # A filler line ("...") before the real answer is dropped here,
+            # while it's still held back and unshown — once real content has
+            # been flushed to the screen it can't be un-shown, so this is
+            # the only safe point to do it.
+            self._pending_start = strip_leading_filler_lines(self._pending_start)
             has_content = bool(self._pending_start.strip())
             if (not has_content or "\n" not in self._pending_start) and \
                     len(self._pending_start) < _DEGENERATE_HOLDBACK_CHARS:
@@ -133,7 +164,8 @@ class StreamParser:
                 if close_idx == -1:
                     break
                 think_text = self._pending[:close_idx].strip()
-                events.append(Thought(think_text))
+                if think_text:
+                    events.append(Thought(think_text))
                 self._pending = self._pending[close_idx + len(_THINK_CLOSE):]
                 self._in_think = False
                 continue
@@ -210,12 +242,37 @@ class StreamParser:
                 events.append(Token(self._pending_start))
 
         full_text = _THINK_PATTERN.sub("", self._full_text).strip()
+        if not self._tool_call_found:
+            # Mirror the live-stream cleanup in what gets SAVED as the
+            # assistant's turn: drop leading filler lines, and if the whole
+            # reply was filler ("...") flag it degenerate so the engine
+            # retries instead of persisting it — a saved "Assistant: ..."
+            # turn gets re-injected by episodic retrieval into every later
+            # prompt and teaches the model to answer "..." (self-reinforcing
+            # pollution loop, observed in practice with a 2B local model).
+            full_text = strip_leading_filler_lines(full_text).strip()
+            if full_text and not _WORD_CHAR.search(full_text):
+                full_text = ""
+            if not full_text and not self._flushed_anything:
+                self._suppressed = True
+                self._degenerate_start = True
 
         tool_call_json = None
         if self._tool_call_found:
             match = _TOOL_CALL_PATTERN.search(self._full_text)
             if match:
                 tool_call_json = match.group(1).strip()
+            else:
+                # The model opened <tool_call> but the closing tag never
+                # arrived (EOS/stop-string cut generation short). The JSON
+                # payload itself is often complete anyway — hand whatever
+                # followed the opening tag to the tool-call parser, which
+                # knows how to dig a JSON object out of surrounding noise.
+                # Without this, tool_call_json stays None and the model gets
+                # a useless "not valid JSON (char 0)" error for a call that
+                # was actually 99% well-formed.
+                _, _, tail = self._full_text.partition(_TOOL_CALL_OPEN)
+                tool_call_json = tail.strip() or None
 
         result = ParseResult(
             full_text=full_text,

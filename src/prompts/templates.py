@@ -179,6 +179,23 @@ def repeated_call_blocked(is_last_hop: bool) -> str:
     )
 
 
+def same_tool_called_again_prefix(function_name: str, previous_output: str) -> str:
+    """Prefix prepended to the normal tool_output_prompt Observation when the
+    model calls a tool it ALREADY called this turn, with different arguments
+    (not blocked outright like an exact repeat — a second, genuinely
+    different search is legitimate). The call still runs; this just makes
+    sure the model can't "forget" the first result and treat a near-
+    duplicate call as if nothing had happened — restates it inline so
+    there's no excuse to call the tool a third time just to "double check"."""
+    return (
+        f"(Note: you already called {function_name} once this turn and got: "
+        f"{previous_output}\n\n"
+        f"Only call {function_name} again if this new attempt is asking for something "
+        "genuinely different — if the result above already answers the user's question, "
+        "answer now in plain text instead.)\n\n"
+    )
+
+
 def force_final_answer() -> str:
     """Used when the hop budget is exhausted: forces a real, non-empty reply
     instead of letting the turn end with nothing shown to the user."""

@@ -12,6 +12,7 @@ reason this module exists as its own file with its own test coverage."""
 
 import inspect
 import json
+import re
 
 from src.engine.errors import ToolExecutionError
 from src.engine.events import ToolCall, ToolResult
@@ -19,20 +20,56 @@ from src.tools.registry import registry
 from src.vision import IMAGE_SENTINEL
 
 
+_EXPECTED_FORMAT = (
+    'expected exactly: <tool_call>{"thought": "why", "name": "tool_name", '
+    '"arguments": {"arg": "value"}}</tool_call>'
+)
+
+_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
+
+
 def parse_tool_call(tool_call_json: str) -> tuple[str, dict, str]:
     """Returns (function_name, arguments, thought). Raises ToolExecutionError
-    if the JSON is malformed or the tool name is missing/placeholder."""
+    if no JSON object can be recovered or the tool name is missing/placeholder.
+
+    Deliberately forgiving about the payload's surroundings: small local
+    models wrap the JSON in prefix chatter, forget the closing tag (the
+    stream parser already recovers that case), or trail off after the
+    object. As long as one parseable JSON object is in there, the call runs;
+    the error message always restates the exact expected format, since the
+    model reads it as an Observation and needs something actionable to
+    self-correct with — 'not valid JSON (char 0)' taught it nothing."""
+    text = (tool_call_json or "").strip()
+    if not text:
+        raise ToolExecutionError(f"the <tool_call> tag was empty — {_EXPECTED_FORMAT}")
+
+    tool_info = None
     try:
-        tool_info = json.loads(tool_call_json.strip())
-    except (json.JSONDecodeError, AttributeError, TypeError) as e:
-        raise ToolExecutionError(f"tool call is not valid JSON ({e})")
+        tool_info = json.loads(text)
+    except json.JSONDecodeError:
+        match = _JSON_OBJECT.search(text)
+        if match:
+            try:
+                tool_info = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+    if not isinstance(tool_info, dict):
+        raise ToolExecutionError(
+            f"could not find a valid JSON object inside <tool_call> — {_EXPECTED_FORMAT}"
+        )
 
     function_name = tool_info.get("name")
     function_args = tool_info.get("arguments", {}) or {}
     thought = str(tool_info.get("thought", "")).strip()
 
     if not function_name or function_name in ("tool_name", "exact_tool_name"):
-        raise ToolExecutionError("no real tool name given — use an exact name from the TOOLS list")
+        raise ToolExecutionError(
+            f"no real tool name given — use an exact name from the TOOLS list; {_EXPECTED_FORMAT}"
+        )
+    if not isinstance(function_args, dict):
+        raise ToolExecutionError(
+            f"'arguments' must be a JSON object of argument names to values — {_EXPECTED_FORMAT}"
+        )
 
     return function_name, function_args, thought
 
@@ -55,10 +92,17 @@ def execute(function_name: str, function_args: dict, thought: str) -> tuple[list
             tool_name=function_name,
         )
 
-    missing = [arg for arg in registry.required_args(function_name) if arg not in function_args]
+    required = registry.required_args(function_name)
+    missing = [arg for arg in required if arg not in function_args]
     if missing:
+        example_args = ", ".join('"%s": "<value>"' % a for a in required)
+        example = (
+            '{"thought": "why", "name": "%s", "arguments": {%s}}'
+            % (function_name, example_args)
+        )
         raise ToolExecutionError(
-            f"missing required argument(s) {missing} for tool '{function_name}'",
+            f"missing required argument(s) {missing} for tool '{function_name}' — "
+            f"call it again with ALL of {required} filled in, e.g. {example}",
             tool_name=function_name,
         )
 

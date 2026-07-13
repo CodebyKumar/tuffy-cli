@@ -27,6 +27,23 @@ from tests.fakes import FakeProvider
 _FAKE_MODEL_ID = "fake-test-model"
 
 
+@pytest.fixture(autouse=True)
+def isolated_memory_db(tmp_path, monkeypatch):
+    """run_turn calls memory.mem.record_turn()/build_context() on the
+    module-level singleton, which points at the REAL ./data/memory/tuffy.db.
+    Without this fixture, every test turn here gets persisted into the
+    user's actual memory database — junk turns like 'do the broken thing'
+    then surface in real episodic retrieval and degrade real answers
+    (observed in practice). Swap in a throwaway store for the duration of
+    each test."""
+    import elastimem
+    import src.memory as memory
+    isolated = elastimem.open(str(tmp_path / "test-mem.db"), context_tokens=4096)
+    monkeypatch.setattr(memory, "mem", isolated)
+    yield
+    isolated.close()
+
+
 @pytest.fixture
 def clean_registry():
     saved_functions = dict(registry.functions)
@@ -131,8 +148,8 @@ class TestFullPipelineToolCall:
         ok, output = _run_silently(session, "tell me a joke")
 
         assert ok is True
-        assert "[tool_call] get_joke" in output
-        assert "[response]" in output
+        assert "[execute] get_joke" in output
+        assert "[result]" in output
         assert "why did the chicken cross the road" in output
         # Compacted history: intermediates dropped, only Q + final A remain
         # (plus the system message at index 0).

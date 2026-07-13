@@ -144,14 +144,24 @@ class _TurnRenderer:
         elif isinstance(event, ToolCall):
             self.spinner.stop(show_prompt=False)
             self._print_prompt_prefix()
+            if event.thought:
+                # The <tool_call> JSON's own "thought" field is a distinct,
+                # short rationale the model writes for THIS call - print it
+                # as a real, permanent [thought] line (same as a <think>
+                # block) rather than feeding it to the spinner label, where
+                # it used to flash for a fraction of a second as
+                # "AI ❯ <thought text>..." and then vanish the instant the
+                # next event stopped the spinner. Nothing should only ever
+                # exist as spinner text.
+                print(f"{C_BLUE}[thought] {event.thought}{C_RESET}", flush=True)
             args_json = json.dumps(event.arguments, ensure_ascii=False)
-            print(f"{C_WARN}[tool_call] {event.name}({args_json}){C_RESET}", flush=True)
+            print(f"{C_WARN}[execute] {event.name}({args_json}){C_RESET}", flush=True)
             self.spinner.start()
         elif isinstance(event, ToolResult):
             self.spinner.stop(show_prompt=False)
             self._print_prompt_prefix()
             color = C_USER if event.ok else C_WARN
-            print(f"{color}[response] {event.result}{C_RESET}", flush=True)
+            print(f"{color}[result] {event.result}{C_RESET}", flush=True)
             self.spinner.start()
         elif isinstance(event, Token):
             if not self._answer_started:
