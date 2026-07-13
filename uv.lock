@@ -441,18 +441,8 @@ wheels = [
 
 [[package]]
 name = "elastimem"
-version = "0.1.1"
-source = { editable = "../elastimem" }
-
-[package.metadata]
-requires-dist = [
-    { name = "fastembed", marker = "extra == 'embed'", specifier = ">=0.4" },
-    { name = "psutil", marker = "extra == 'system'", specifier = ">=5.9" },
-    { name = "sqlite-vec", marker = "extra == 'vec'", specifier = ">=0.1" },
-]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.0" }]
+version = "0.1.0a1"
+source = { git = "https://github.com/CodebyKumar/elastimem.git#5b944d41119a110380f4b7d029b26335d8b44e8e" }
 
 [[package]]
 name = "exceptiongroup"
@@ -2454,7 +2444,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "ddgs", specifier = ">=9.14.4" },
-    { name = "elastimem", editable = "../elastimem" },
+    { name = "elastimem", git = "https://github.com/CodebyKumar/elastimem.git" },
     { name = "fastembed", specifier = ">=0.8.0" },
     { name = "llama-cpp-python", specifier = ">=0.3.32" },
     { name = "mcp", specifier = ">=1.28.1" },

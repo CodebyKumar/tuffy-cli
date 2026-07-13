@@ -6,8 +6,11 @@ dist/
 wheels/
 *.egg-info
 
-# Virtual environments
+# Virtual environments (includes .venv/.tuffy_cuda_ready, the Jetson CUDA-build marker)
 .venv
+
+# Test cache
+.pytest_cache/
 
 # Model weights (large files)
 src/models/weights/

@@ -73,8 +73,14 @@ echo
 
 # llama-cpp-python must NEVER be touched by plain `uv sync` — the default
 # PyPI wheel is CPU-only and would silently clobber the CUDA source build
-# we install below, forcing a full rebuild on every subsequent run.
+# we install below, forcing a full rebuild on every subsequent run. Both
+# the explicit flag (this script's own `uv sync` calls) and the env var
+# (uv reads UV_NO_INSTALL_PACKAGE itself, so it also protects any bare
+# `uv sync` run directly in this same process/subshell) are set — belt
+# and suspenders, since the RC-file guard below only applies to *future*
+# shells, not this one.
 SYNC_FLAGS=(--no-install-package llama-cpp-python)
+export UV_NO_INSTALL_PACKAGE="llama-cpp-python"
 
 verify_cuda() {
     .venv/bin/python - <<'PY'
@@ -92,13 +98,14 @@ print(info)
 PY
 }
 
-# Fingerprint of everything that should invalidate a cached CUDA build:
-# the resolved lockfile (dependency/version changes) and this script itself
-# (CMAKE flags, architecture, etc).
+# Fingerprint of only what should invalidate the cached CUDA build: the
+# llama-cpp-python version constraint (a bump there means a real rebuild) and
+# this script itself (CMAKE flags, architecture, etc). Deliberately NOT the
+# whole lockfile - unrelated dependency bumps (elastimem, mcp, ...) must not
+# trigger a ~20-30 min llama-cpp-python source rebuild for nothing.
 current_fingerprint() {
-    local lock_file="uv.lock"
-    [[ -f "$lock_file" ]] || lock_file="pyproject.toml"
-    cat "$lock_file" "$SCRIPT_DIR/setup_jetson.sh" 2>/dev/null | shasum -a 256 | awk '{print $1}'
+    grep -A2 '"llama-cpp-python' pyproject.toml 2>/dev/null | cat - "$SCRIPT_DIR/setup_jetson.sh" 2>/dev/null \
+        | shasum -a 256 | awk '{print $1}'
 }
 
 #
@@ -250,9 +257,15 @@ tuffy() {
     python main.py
 }
 
-# Inside the Tuffy project, a plain "uv sync" must never reinstall
-# llama-cpp-python's PyPI wheel over the CUDA source build — always
-# exclude it here so you don't have to remember the flag by hand.
+# "uv sync" must never reinstall llama-cpp-python's PyPI wheel over the
+# CUDA source build. UV_NO_INSTALL_PACKAGE is uv's own env var for this
+# (see "uv sync --help") — set globally rather than scoped to \$TUFFY_HOME
+# so it also covers a bare "uv sync" run from a script, cron job, or any
+# non-interactive shell that sourced this rc file without going through
+# the uv() function below. Harmless for any other project, since it only
+# ever affects a package actually named llama-cpp-python.
+export UV_NO_INSTALL_PACKAGE="llama-cpp-python"
+
 uv() {
     if [[ "\$PWD" == "\$TUFFY_HOME"* && "\$1" == "sync" ]]; then
         command uv sync --no-install-package llama-cpp-python "\${@:2}"
