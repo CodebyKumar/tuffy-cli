@@ -29,10 +29,40 @@ _CALL_TIMEOUT_SECONDS = 30
 _connected_servers = []  # names of servers successfully connected, for /tools-adjacent diagnostics
 
 
+def _normalize_configs(data) -> list[dict]:
+    """Accepts every server-config shape actually seen in the wild, so a
+    snippet copied from an MCP server's README or from Claude Desktop/Code's
+    own config works in .tuffy/mcp.json unmodified:
+
+    1. The REAL standard (Claude Desktop/Code, Cursor, and virtually every
+       MCP server's own README "add to your config" snippet): an
+       {"mcpServers": {"<name>": {"command": ..., "args": [...], "env": {...}}}}
+       object keyed by server name — the name lives in the KEY, not a field
+       inside the value.
+    2. {"servers": [...]}: a bare list of {name, command, args?, env?}
+       dicts — Tuffy's own original shape, kept for backward compatibility
+       with configs already written against it (and what /mcp add writes).
+    3. A bare top-level list, same entry shape as #2.
+
+    "type": "stdio" (present in some real-world configs, including
+    Anthropic's own docs) is accepted and ignored — stdio is the only
+    transport this client supports, so the field carries no decision."""
+    if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict):
+        return [
+            {"name": name, **cfg}
+            for name, cfg in data["mcpServers"].items()
+            if isinstance(cfg, dict)
+        ]
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        return data.get("servers", [])
+    return []
+
+
 def _load_server_configs() -> list[dict]:
-    """Reads .tuffy/mcp.json (a JSON list of {name, command, args?, env?}),
-    matching the Claude Desktop/Code config shape. Missing file means no
-    servers configured — not an error."""
+    """Reads .tuffy/mcp.json. Missing file means no servers configured —
+    not an error. See _normalize_configs for every accepted shape."""
     if not os.path.isfile(MCP_CONFIG_PATH):
         return []
     try:
@@ -42,11 +72,10 @@ def _load_server_configs() -> list[dict]:
         print(f"[mcp] Failed to read {MCP_CONFIG_PATH}: {e}")
         return []
 
-    # Accept either a bare list, or {"servers": [...]} for readability.
-    servers = data if isinstance(data, list) else data.get("servers", [])
+    servers = _normalize_configs(data)
     valid = []
     for entry in servers:
-        if "name" not in entry or "command" not in entry:
+        if not isinstance(entry, dict) or "name" not in entry or "command" not in entry:
             print(f"[mcp] Skipping malformed server config (needs 'name' and 'command'): {entry}")
             continue
         valid.append(entry)
@@ -123,6 +152,37 @@ class _MCPBridge:
         _connected_servers.extend(connected)
         return connected
 
+    async def _disconnect_one(self, name: str) -> None:
+        session = self._sessions.pop(name, None)
+        if session is None:
+            return
+        # Best-effort: the mcp SDK's ClientSession/stdio_client context
+        # managers don't expose a standalone close() outside their __aexit__
+        # protocol, and __aexit__ requires the exact exception-info tuple
+        # from the `async with` block that opened them - which no longer
+        # exists here (they were entered manually in _connect_one, outside
+        # any `async with`, specifically so the session could outlive that
+        # function call). Terminating the subprocess is what actually stops
+        # the server; a session/stream that never gets a clean __aexit__ is
+        # harmless - it's already unreachable garbage once popped above.
+        transport = getattr(session, "_transport", None) or getattr(session, "_read_stream", None)
+        proc = getattr(transport, "_process", None) if transport else None
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+
+    def disconnect(self, name: str) -> bool:
+        """Disconnects a live server by name: terminates its subprocess and
+        drops the session. Returns False if no such server was connected."""
+        if name not in self._sessions:
+            return False
+        self.run_coro(self._disconnect_one(name))
+        if name in _connected_servers:
+            _connected_servers.remove(name)
+        return True
+
     def _register_tool(self, server_name: str, session: ClientSession, tool) -> None:
         schema = tool.inputSchema or {}
         properties = schema.get("properties", {})
@@ -166,6 +226,23 @@ class _MCPBridge:
 _bridge = _MCPBridge()
 
 
+def connect_one_server(config: dict) -> None:
+    """Connects a single server and registers its tools immediately, without
+    restarting Tuffy — used by `/mcp add` so a newly configured server is
+    usable in the same session. Starts the bridge thread if this is the
+    first MCP connection of the session (mirrors connect_mcp_servers).
+    Raises on failure (unlike connect_all, which only warns and skips) so
+    the caller can show the user exactly why the new server didn't connect."""
+    if _bridge._loop is None:
+        _bridge.start()
+    name = config["name"]
+    session = _bridge.run_coro(_bridge._connect_one(config))
+    tools_result = _bridge.run_coro(session.list_tools())
+    for tool in tools_result.tools:
+        _bridge._register_tool(name, session, tool)
+    _connected_servers.append(name)
+
+
 def connect_mcp_servers(extra_configs: list[dict] = None) -> list[str]:
     """Starts the bridge thread (once) and connects to every server in
     .tuffy/mcp.json plus any extra_configs (e.g. from skills' mcp.json).
@@ -183,3 +260,13 @@ def connect_mcp_servers(extra_configs: list[dict] = None) -> list[str]:
 
 def connected_servers() -> list[str]:
     return list(_connected_servers)
+
+
+def disconnect_server(name: str) -> bool:
+    """Disconnects a live server by name (terminates its subprocess, drops
+    the session) — the live-session half of `/mcp remove`; the caller is
+    also responsible for registry.unregister_group(f"mcp:{name}") and
+    removing the entry from .tuffy/mcp.json (see mcp_install.remove_server_config).
+    Returns False if the server wasn't connected this session (e.g. it was
+    only ever in the config file, never successfully connected)."""
+    return _bridge.disconnect(name)

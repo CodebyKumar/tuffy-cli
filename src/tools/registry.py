@@ -112,5 +112,18 @@ class ToolRegistry:
         """Public grouped view for CLI display (e.g. /tools)."""
         return self._grouped_schemas()
 
+    def unregister_group(self, group: str) -> list[str]:
+        """Removes every tool registered under `group` (e.g. 'mcp:<server>')
+        from functions/schemas/groups. Used by `/mcp remove` to take a
+        disconnected server's tools out of the live registry immediately,
+        rather than leaving stale entries the model could still see or call
+        until the next restart. Returns the names removed."""
+        removed = [name for name, g in self.groups.items() if g == group]
+        for name in removed:
+            self.functions.pop(name, None)
+            self.groups.pop(name, None)
+        self.schemas = [s for s in self.schemas if s["function"]["name"] not in removed]
+        return removed
+
 
 registry = ToolRegistry()

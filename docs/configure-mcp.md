@@ -5,40 +5,79 @@ stdio and use its tools exactly like a native one — same registry, same dispat
 changes required. See [src/tools/mcp_client.py](../src/tools/mcp_client.py) for the
 implementation.
 
-## 1. Create the config file
+## Fastest path: `/mcp add <github-url>`
 
-Create `.tuffy/mcp.json` (it's gitignored — safe to put secrets in it). It's either a bare JSON
-list of server configs, or `{"servers": [...]}`:
+For a server published as an npm package (has a `package.json` with a `bin` entry) or a Python
+package (has a `pyproject.toml` with a `[project.scripts]` entry point) — which covers most MCP
+servers on GitHub — run inside Tuffy:
 
-```json
-[
-  {
-    "name": "filesystem",
-    "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/directory"]
-  },
-  {
-    "name": "github",
-    "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-github"],
-    "env": {
-      "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..."
-    }
-  }
-]
+```
+/mcp add https://github.com/modelcontextprotocol/servers-filesystem
+/mcp add https://github.com/owner/repo my-custom-name
 ```
 
-Each entry:
+This fetches the repo's manifest from its default branch, infers the `npx -y <package>` or
+`uvx <package>` launch command, appends it to `.tuffy/mcp.json`, and connects it immediately —
+no restart needed, no hand-written JSON. See [src/tools/mcp_install.py](../src/tools/mcp_install.py)
+for the resolution logic.
+
+It deliberately never clones the repo or runs its build/install scripts — only the two
+well-known, registry-published launch shapes above are supported. If a repo doesn't fit either
+(a server that needs a local build, a non-standard entry point, ...), `/mcp add` fails with an
+explanation and you fall back to the manual steps below.
+
+## Removing a server: `/mcp remove <name>`
+
+```
+/mcp remove filesystem
+```
+
+Undoes everything `/mcp add` did, in one step: terminates the server's subprocess if it's
+currently connected, unregisters its tools from the live registry immediately (the model stops
+seeing them this turn, not just after a restart), and removes its entry from `.tuffy/mcp.json`.
+Works even if only one of those is true — e.g. a server that's in the config but failed to
+connect this session still gets its config entry removed. Reports "not found" if the name
+matches neither a config entry nor a live connection.
+
+## 1. Create the config file (manual path)
+
+Create `.tuffy/mcp.json` (it's gitignored — safe to put secrets in it). Tuffy accepts the same
+`"mcpServers"` shape used by Claude Desktop, Claude Code, Cursor, and virtually every MCP
+server's own README "add to your config" snippet — copy one straight in, no translation needed:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/directory"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..."
+      }
+    }
+  }
+}
+```
+
+Each server's key is its name (prefixes every tool it registers, e.g. `filesystem_read_file`);
+the value is:
 
 | Field | Required | Meaning |
 |---|---|---|
-| `name` | yes | Short identifier. Prefixes every tool this server registers, e.g. `filesystem_read_file`. |
 | `command` | yes | Executable to launch the server (`npx`, `python3`, a compiled binary, ...). |
 | `args` | no | Argument list passed to `command`. |
 | `env` | no | Extra environment variables merged into the subprocess's environment (for API tokens, etc). |
+| `type` | no | Accepted and ignored if present (some configs include `"type": "stdio"`) — stdio is the only transport this client supports. |
 
-This is the same shape used by Claude Desktop/Code's MCP config, so you can usually copy an
-existing config over directly.
+Two older shapes are also still accepted, for configs already written against them or written by
+`/mcp add`: a bare list, or `{"servers": [...]}`, of `{name, command, args?, env?}` dicts (`name`
+as a field inside each entry rather than the object key). See
+[src/tools/mcp_client.py](../src/tools/mcp_client.py)'s `_normalize_configs` for the exact
+resolution logic — a malformed entry is skipped with a printed warning, never a hard failure.
 
 ## 2. Start Tuffy
 

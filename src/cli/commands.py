@@ -7,7 +7,8 @@ import os
 
 import src.memory as memory
 from src.tools.registry import registry, group_title
-from src.tools.mcp_client import connected_servers, MCP_CONFIG_PATH
+from src.tools.mcp_client import connected_servers, connect_one_server, disconnect_server, MCP_CONFIG_PATH
+from src.tools.mcp_install import resolve_server_config, append_server_config, remove_server_config, MCPInstallError
 from src.models.registry import registry as model_registry
 from src.settings import set_default_model
 from src.skills.loader import list_skills
@@ -33,11 +34,14 @@ _HELP_SECTIONS = [
         ("/tools", "list every tool the agent can call, grouped by domain"),
         ("/skills", "list installed skills (drop new ones in ./.tuffy/skills/<name>/)"),
         ("/mcp", "list connected MCP servers and the tools they registered"),
-        ("/status", "show the active model, vision support, and turn count"),
+        ("/mcp add <github-url> [name]", "resolve a GitHub repo to an MCP server, add it to config, connect now"),
+        ("/mcp remove <name>", "disconnect an MCP server and remove it from config"),
+        ("/status", "show the active model, vision support, turn count, and recent turn health"),
     ]),
     ("Models", [
         ("/models", "list available models (local + API) and the active one"),
-        ("/models <id>", "switch to a different model, unloading the current one"),
+        ("/models switch <id>", "switch to a different model, unloading the current one"),
+        ("/models <id>", "shorthand for '/models switch <id>'"),
         ("/models default <id>", "switch to a model and remember it as the startup default"),
         ("/models info <id>", "show a model's full model card"),
     ]),
@@ -175,7 +179,7 @@ def cmd_models(session: Session, arg: str):
             provider = card["provider"]
             tag = "local" if provider == "llama_cpp" else f"api: {provider}"
             print(f"  {marker} {model_id} - {card['name']} [{caps}] ({tag})")
-        print(f"{C_DIM}  Use '/models info <id>' for full model card, '/models <id>' to switch, "
+        print(f"{C_DIM}  Use '/models info <id>' for full model card, '/models switch <id>' to switch, "
               f"'/models default <id>' to switch and remember for next startup.{C_RESET}\n")
         return
 
@@ -205,6 +209,9 @@ def cmd_models(session: Session, arg: str):
                       f"{limits['tokens_per_minute']:,} tok/min, {limits['tokens_per_day']:,} tok/day")
         print()
         return
+
+    if arg.lower().startswith("switch "):
+        arg = arg[len("switch "):].strip()
 
     make_default = False
     if arg.lower().startswith("default "):
@@ -241,7 +248,7 @@ def cmd_image(session: Session, image_path: str):
         print(f"{C_DIM}Usage: /image <path-to-image>{C_RESET}\n")
         return
     if not session.agent.supports_vision:
-        print(f"{C_DIM}Model '{session.current_model_id}' has no vision capability. Switch models with /models <id>.{C_RESET}\n")
+        print(f"{C_DIM}Model '{session.current_model_id}' has no vision capability. Switch models with /models switch <id>.{C_RESET}\n")
         return
     try:
         session.pending_image_data_uri = encode_image_to_data_uri(image_path)
@@ -284,11 +291,20 @@ def cmd_skills(session: Session):
 
 # --- /mcp --------------------------------------------------------------
 
-def cmd_mcp(session: Session):
+def cmd_mcp(session: Session, arg: str = ""):
+    arg = arg.strip()
+    if arg.startswith("add"):
+        _cmd_mcp_add(arg[len("add"):].strip())
+        return
+    if arg.startswith("remove"):
+        _cmd_mcp_remove(arg[len("remove"):].strip())
+        return
+
     servers = connected_servers()
     if not servers:
         print(
-            f"{C_DIM}No MCP servers connected. Create {MCP_CONFIG_PATH} to configure some — "
+            f"{C_DIM}No MCP servers connected. Run '/mcp add <github-url>' to add one "
+            f"automatically, or create {MCP_CONFIG_PATH} by hand — "
             f"see docs/configure-mcp.md for the config shape and examples.{C_RESET}\n"
         )
         return
@@ -305,6 +321,67 @@ def cmd_mcp(session: Session):
     print()
 
 
+def _cmd_mcp_add(arg: str):
+    if not arg:
+        print(f"{C_WARN}Usage: /mcp add <github-url> [name]{C_RESET}\n")
+        return
+    parts = arg.split()
+    github_url = parts[0]
+    custom_name = parts[1] if len(parts) > 1 else None
+
+    print(f"{C_DIM}Resolving '{github_url}'...{C_RESET}")
+    try:
+        config = resolve_server_config(github_url, name=custom_name)
+    except MCPInstallError as e:
+        print(f"{C_WARN}{e}{C_RESET}\n")
+        return
+
+    try:
+        append_server_config(config)
+    except MCPInstallError as e:
+        print(f"{C_WARN}{e}{C_RESET}\n")
+        return
+
+    print(
+        f"{C_SUCCESS}Added '{config['name']}' to {MCP_CONFIG_PATH} "
+        f"({config['command']} {' '.join(config['args'])}).{C_RESET}"
+    )
+
+    print(f"{C_DIM}Connecting now...{C_RESET}")
+    try:
+        connect_one_server(config)
+    except Exception as e:
+        print(
+            f"{C_WARN}Saved to config but couldn't connect this session: {e}{C_RESET}\n"
+            f"{C_DIM}It will be retried automatically next time Tuffy starts.{C_RESET}\n"
+        )
+        return
+    print(f"{C_SUCCESS}Connected — its tools are available now, no restart needed. Run /mcp to see them.{C_RESET}\n")
+
+
+def _cmd_mcp_remove(name: str):
+    if not name:
+        print(f"{C_WARN}Usage: /mcp remove <name>{C_RESET}\n")
+        return
+
+    was_in_config = remove_server_config(name)
+    was_connected = disconnect_server(name)
+    removed_tools = registry.unregister_group(f"mcp:{name}")
+
+    if not was_in_config and not was_connected:
+        print(f"{C_WARN}No MCP server named '{name}' found (checked both {MCP_CONFIG_PATH} and this session's live connections).{C_RESET}\n")
+        return
+
+    parts = []
+    if was_in_config:
+        parts.append(f"removed from {MCP_CONFIG_PATH}")
+    if was_connected:
+        parts.append("disconnected")
+    if removed_tools:
+        parts.append(f"{len(removed_tools)} tool(s) unregistered")
+    print(f"{C_SUCCESS}'{name}': {', '.join(parts)}.{C_RESET}\n")
+
+
 # --- /status -------------------------------------------------------------
 
 def cmd_status(session: Session):
@@ -319,6 +396,7 @@ def cmd_status(session: Session):
     print(f"  vision      : {vision}")
     print(f"  turns so far: {turns}")
     print(f"  pending img : {'yes' if session.pending_image_data_uri else 'no'}")
+    print(f"  recent health: {session.health.summary()}")
     if context_length:
         pct = used_tokens / context_length * 100
         print(f"  context used: ~{used_tokens:,} / {context_length:,} tok ({pct:.1f}%, estimated)")
@@ -381,8 +459,8 @@ def handle_command(session: Session, stripped: str) -> str:
         cmd_skills(session)
         return "handled"
 
-    if command == "/mcp":
-        cmd_mcp(session)
+    if command == "/mcp" or command.startswith("/mcp "):
+        cmd_mcp(session, stripped[len("/mcp"):].strip())
         return "handled"
 
     return "unhandled"
