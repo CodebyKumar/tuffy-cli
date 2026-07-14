@@ -4,11 +4,57 @@ is the only place main.py's turn loop reaches into for agent state."""
 
 import gc
 import os
+from collections import deque
 
 from src.engine.model_agent import ModelAgent
 from src.prompts import build_system_prompt
 from src.models.registry import registry as model_registry
 from src.cli.display import C_DIM, C_WARN, C_RESET
+
+_HEALTH_WINDOW = 10
+_CONSECUTIVE_FAILURE_NUDGE_THRESHOLD = 3
+
+
+class TurnHealth:
+    """Passive rolling record of how the last few turns against the CURRENT
+    model went - fed from real Done/Failed outcomes turn.py already sees, no
+    extra model calls or background threads. llama.cpp's model object isn't
+    thread-safe (a prior bug here came from a background worker racing a
+    foreground generation on the same instance - see memory/
+    tuffy-elastimem-integration.md), so this only ever reads events the
+    normal turn loop already produced instead of polling the model."""
+
+    def __init__(self):
+        self._outcomes: deque[str] = deque(maxlen=_HEALTH_WINDOW)  # "ok" | "oom" | "provider" | "interrupted" | other kind
+
+    def record(self, failed_kind: str | None):
+        self._outcomes.append(failed_kind or "ok")
+
+    def reset(self):
+        self._outcomes.clear()
+
+    def consecutive_failures(self) -> int:
+        n = 0
+        for outcome in reversed(self._outcomes):
+            if outcome == "ok":
+                break
+            n += 1
+        return n
+
+    def should_nudge(self) -> bool:
+        return self.consecutive_failures() >= _CONSECUTIVE_FAILURE_NUDGE_THRESHOLD
+
+    def summary(self) -> str:
+        if not self._outcomes:
+            return "no turns yet"
+        ok = sum(1 for o in self._outcomes if o == "ok")
+        total = len(self._outcomes)
+        tail = self.consecutive_failures()
+        line = f"{ok}/{total} of last turns succeeded"
+        if tail:
+            recent_kind = self._outcomes[-1]
+            line += f" ({tail} failure(s) in a row, most recent: {recent_kind})"
+        return line
 
 # Prefix marking a model-switch notice injected into history (see
 # Session.switch_model) so a later switch can find and replace it instead of
@@ -162,6 +208,7 @@ class Session:
         self.agent = load_agent(model_id)
         self.pending_image_data_uri = None
         self.captured_images = []
+        self.health = TurnHealth()
 
         self.messages = [self.system_message()]
 
@@ -204,6 +251,7 @@ class Session:
         memory.reconfigure_for_model(new_card, static_prompt_tokens=static_tokens)
         old_model_id = self.current_model_id
         self.current_model_id = model_id
+        self.health.reset()
         # Conversation history is kept (not reset) across a model switch, but
         # the new model needs to know a switch happened - otherwise it can
         # mistake a plain "hi" for a nudge to re-answer the last unresolved

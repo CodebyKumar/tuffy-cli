@@ -11,7 +11,9 @@ from llama_cpp import Llama
 from llama_cpp.llama_chat_format import MTMDChatHandler
 
 from src.llm.base import LLMProvider
-from src.engine.errors import OutOfMemoryError
+from src.engine.errors import ContextOverflowError, OutOfMemoryError
+
+_CONTEXT_OVERFLOW_MARKER = "exceeds n_ctx"
 
 _VISION_CAPABILITIES = {"vision", "omni"}
 
@@ -132,3 +134,16 @@ class LlamaCppProvider(LLMProvider):
             # decode path rather than from unrelated code (e.g. a tool)
             # further up the call stack.
             raise OutOfMemoryError(str(e)) from e
+        except ValueError as e:
+            # llama-cpp-python's chat handler raises a bare ValueError
+            # ("Prompt exceeds n_ctx: X > Y") when the assembled prompt is
+            # too long for the model's context window - observed in
+            # practice when a degenerate reply loop (the model repeating a
+            # near-identical paragraph across several ReAct hops within one
+            # turn) grows the in-flight message list past the limit faster
+            # than trim_history's between-turn eviction can catch it. Left
+            # untranslated this crashes the whole process (a raw traceback,
+            # session gone) instead of ending just the one turn.
+            if _CONTEXT_OVERFLOW_MARKER in str(e):
+                raise ContextOverflowError(str(e)) from e
+            raise

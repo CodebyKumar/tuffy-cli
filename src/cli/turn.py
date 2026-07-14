@@ -10,12 +10,36 @@ stream — and every branch below corresponds to one event type. No hidden
 control flow, no values smuggled through StopIteration."""
 
 import json
+import os
 
 import src.memory as memory
 from src.cli.session import Session, keep_only_latest_image, trim_history, compact_turn
 from src.cli.display import Spinner, C_AI, C_BLUE, C_DIM, C_RESET, C_USER, C_WARN, CLEAR_LINE
 from src.engine import turn_engine
-from src.engine.events import Done, Failed, Status, Thought, Token, ToolCall, ToolResult
+from src.engine.events import AnswerStart, Done, Failed, Status, Thought, Token, ToolCall, ToolResult
+
+_DEBUG_CONTEXT_ENV = "TUFFY_DEBUG_CONTEXT"
+
+
+def _dump_debug_context(user_input: str, messages: list) -> None:
+    """When TUFFY_DEBUG_CONTEXT=<path> is set, appends the exact system
+    prompt and full message history sent for this turn to that file — a
+    ground-truth trace of what the model actually saw, for diagnosing
+    memory/context bugs (garbled facts, stale retrieval, runaway history
+    growth) that are invisible from the rendered chat transcript alone.
+    No-op (and no file I/O) when the env var isn't set."""
+    path = os.environ.get(_DEBUG_CONTEXT_ENV)
+    if not path:
+        return
+    with open(path, "a") as f:
+        f.write(f"\n{'='*80}\nUSER: {user_input}\n{'-'*80}\n")
+        f.write(f"SYSTEM MESSAGE:\n{messages[0]['content']}\n")
+        f.write(f"{'-'*80}\nFULL HISTORY ({len(messages)} messages):\n")
+        for i, m in enumerate(messages):
+            content = m.get("content")
+            if isinstance(content, list):
+                content = "[multipart/image content]"
+            f.write(f"  [{i}] {m.get('role')}: {str(content)[:300]}\n")
 
 
 def run_turn(session: Session, user_input: str) -> bool:
@@ -26,6 +50,7 @@ def run_turn(session: Session, user_input: str) -> bool:
 
     messages = session.messages
     messages[0] = session.system_message(context_plan=plan)
+    _dump_debug_context(user_input, messages)
     user_message = {"role": "user", "content": user_input}
     pending_image = session.pending_image_data_uri
     if pending_image:
@@ -60,7 +85,23 @@ def run_turn(session: Session, user_input: str) -> bool:
     if outcome_failed is not None:
         print()
         _report_failure(outcome_failed)
+        session.health.record(outcome_failed.kind)
+        if session.health.should_nudge():
+            print(
+                f"{C_DIM}[{session.health.consecutive_failures()} failed turns in a row on this "
+                f"model — try /models to switch, or /status for details.]{C_RESET}\n"
+            )
         del messages[turn_start:]
+        if outcome_failed.kind == "context_overflow":
+            # Rolling back this turn's own additions (above) isn't enough —
+            # the PRE-EXISTING history was already large enough to overflow,
+            # so the very next turn would hit the same wall immediately.
+            # Force a hard trim down to a small fixed window now, rather
+            # than waiting for the normal budget-based trim_history (which
+            # runs on the next turn anyway, but against the same
+            # already-too-large plan.keep_last_n_turns that let this
+            # happen).
+            session.messages = messages = _force_trim(messages, keep_last_n_turns=1)
         return False
 
     # The pending image is only cleared once the turn actually succeeded —
@@ -78,6 +119,7 @@ def run_turn(session: Session, user_input: str) -> bool:
         # reply as an example to repeat) and pollutes elastimem's episodic
         # record.
         del messages[turn_start:]
+        session.health.record("empty")
         print(f"{C_DIM}[No response generated — turn discarded, try again]{C_RESET}\n")
         return False
 
@@ -86,9 +128,22 @@ def run_turn(session: Session, user_input: str) -> bool:
     # final answer carries what mattered, and stale tool dumps slow every
     # later turn. Trace mode already showed them live; nothing is lost.
     compact_turn(messages, turn_start)
+    session.health.record(None)
 
     memory.mem.record_turn(user_input, full_response)
     return True
+
+
+def _force_trim(messages: list, keep_last_n_turns: int) -> list:
+    """A fixed-budget trim_history call for the context_overflow recovery
+    path, where the normal plan-derived budget already proved too generous
+    for what actually fit. A plain object with just the one attribute
+    trim_history reads, rather than a full context_plan."""
+    class _FixedPlan:
+        pass
+    plan = _FixedPlan()
+    plan.keep_last_n_turns = keep_last_n_turns
+    return trim_history(messages, plan)
 
 
 def _report_failure(failure: Failed):
@@ -97,6 +152,11 @@ def _report_failure(failure: Failed):
         print(
             f"{C_DIM}[Generation failed: {failure.message}. The machine is likely low on "
             f"memory — close some apps and try again.]{C_RESET}\n"
+        )
+    elif failure.kind == "context_overflow":
+        print(
+            f"{C_DIM}[Generation failed: the conversation grew too long for this model's "
+            f"context window. Trimming older history — try again.]{C_RESET}\n"
         )
     elif failure.kind == "provider":
         print(f"{C_DIM}[Generation failed: {failure.message}]{C_RESET}\n")
@@ -163,8 +223,30 @@ class _TurnRenderer:
             color = C_USER if event.ok else C_WARN
             print(f"{color}[result] {event.result}{C_RESET}", flush=True)
             self.spinner.start()
+        elif isinstance(event, AnswerStart):
+            # Retires the spinner and prints the "AI ❯" prefix BEFORE any
+            # answer content streams, rather than inferring "the answer
+            # started" from the first Token itself (the old signal). That
+            # inference raced against the spinner's own background-thread
+            # redraw: if the first Token happened to land while the spinner
+            # was mid-frame, and that Token's text contained a newline or
+            # multiple lines (a code fence, a list), the spinner's row-count
+            # tracking (see Spinner._clear_last_render) could miscount and
+            # corrupt the terminal display on the next redraw it never got
+            # to do, since answer text was now sharing the same screen
+            # region a still-notionally-running spinner thought it owned.
+            # This event makes the handoff a hard boundary instead of a race.
+            if not self._answer_started:
+                self._answer_started = True
+                self.spinner.stop(show_prompt=False)
+                self._print_prompt_prefix()
         elif isinstance(event, Token):
             if not self._answer_started:
+                # Fallback for the (should be rare, given personas.yaml now
+                # mandates the tag) case where the model's reply never used
+                # <final_response> at all - same handoff as AnswerStart,
+                # just triggered by the first Token instead of a dedicated
+                # event, exactly as before this fix existed.
                 self._answer_started = True
                 self.spinner.stop(show_prompt=False)
                 self._print_prompt_prefix()

@@ -31,7 +31,8 @@ Every slash command, grouped the same way `/help` groups them inside Tuffy. See
 | Command | What it does |
 |---|---|
 | `/models` | List every registered model (local and API), marking the active one. |
-| `/models <id>` | Switch to a different model, unloading the current one. Loads the new one first, so a failed switch leaves you on the working model. |
+| `/models switch <id>` | Switch to a different model, unloading the current one. Loads the new one first, so a failed switch leaves you on the working model. |
+| `/models <id>` | Shorthand for `/models switch <id>`. |
 | `/models default <id>` | Switch to a model and persist it as the startup default (`.tuffy/settings.json`, gitignored) — it loads automatically next time Tuffy starts. |
 | `/models info <id>` | Show a model's full card: capabilities, context length, license, source, and (for API models) endpoint/key details. |
 
@@ -46,3 +47,18 @@ Every slash command, grouped the same way `/help` groups them inside Tuffy. See
 
 See [src/cli/README.md](../src/cli/README.md) — write a `cmd_<name>` function, add a branch to
 `handle_command()`, add a row to `_HELP_SECTIONS`. No other file needs to change.
+
+## Debugging: TUFFY_DEBUG_CONTEXT
+
+Set `TUFFY_DEBUG_CONTEXT=<path>` before starting Tuffy to append the exact system prompt and full
+message history sent to the model, for every turn, to that file:
+
+```bash
+TUFFY_DEBUG_CONTEXT=/tmp/tuffy-debug.log uv run main.py
+```
+
+This is a ground-truth trace of what the model actually saw — useful for diagnosing
+memory/context bugs (a stale or garbled fact, retrieval returning the wrong thing, history
+growing unexpectedly large) that aren't visible from the rendered chat transcript alone. No-op
+(zero file I/O) when unset. See `_dump_debug_context` in
+[src/cli/turn.py](../src/cli/turn.py).

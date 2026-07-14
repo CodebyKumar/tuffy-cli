@@ -19,6 +19,16 @@ class OutOfMemoryError(TurnError):
     at the engine level."""
 
 
+class ContextOverflowError(TurnError):
+    """The assembled prompt (system message + history + this turn's ReAct
+    hops) exceeded the model's context window. Distinct from
+    OutOfMemoryError: this is a sizing problem the turn can recover from by
+    dropping older history, not a resource-pressure problem the machine
+    needs to resolve. llama.cpp raises a bare ValueError for this — only the
+    provider adapter that can positively identify it is allowed to
+    translate it, same rule as OutOfMemoryError above."""
+
+
 class ToolExecutionError(TurnError):
     """A tool call could not be parsed or its function raised. Carries the
     tool name (when known) so the loop can record a self-correction lesson,

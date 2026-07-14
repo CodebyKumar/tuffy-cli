@@ -53,9 +53,17 @@ class TestParseToolCall:
         with pytest.raises(ToolExecutionError):
             tool_dispatch.parse_tool_call('{"arguments": {}}')
 
-    def test_placeholder_name_rejected(self):
-        with pytest.raises(ToolExecutionError):
-            tool_dispatch.parse_tool_call('{"name": "tool_name", "arguments": {}}')
+    def test_non_blank_name_parses_even_if_not_a_real_tool(self):
+        """parse_tool_call only validates JSON shape - it has no hardcoded
+        list of "fake" tool names (a small model echoing wording like "no
+        tool needed" or a placeholder like "tool_name" into the name field
+        both look the same to this function: a non-blank string). Whether
+        the name is a REAL tool is a registry lookup, done by the caller
+        (turn_engine), not a string blocklist here."""
+        name, _, _ = tool_dispatch.parse_tool_call('{"name": "tool_name", "arguments": {}}')
+        assert name == "tool_name"
+        name, _, _ = tool_dispatch.parse_tool_call('{"name": "no tool needed", "arguments": {}}')
+        assert name == "no tool needed"
 
     def test_empty_payload_gives_actionable_error(self):
         """Regression test: a truncated <tool_call> (closing tag never

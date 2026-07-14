@@ -44,7 +44,27 @@ registry.register(
         # every time a question repeated; a little temperature plus repeat
         # penalty keeps answers fresh without derailing tool-call syntax.
         "temperature": 0.3,
-        "repeat_penalty": 1.1,
+        # 1.1 alone was observed to NOT be enough to break a strong
+        # repetition attractor in this 2B model - a live session saw it
+        # regenerate one identical paragraph 25+ times in a single answer
+        # with no EOS and no stop-string match, eventually overflowing the
+        # context window and crashing the process. Raised repeat_penalty,
+        # and added frequency_penalty (llama-cpp-python's
+        # create_chat_completion has no repeat_last_n window control at
+        # this API level - frequency_penalty is the real, valid knob that
+        # scales with how often a token has already recurred, which is what
+        # actually helps against a whole-paragraph-length repeat).
+        # max_tokens below is the hard backstop regardless of whether
+        # tuning fully prevents the next one.
+        "repeat_penalty": 1.3,
+        "frequency_penalty": 0.4,
+        # Hard ceiling on one answer's length. Without this, a degenerate
+        # repetition loop has nothing to stop it except the context window
+        # itself filling up (see above) - that's a crash, not a bounded
+        # failure. 600 tokens is generous for the 250-word soft limit the
+        # system prompt asks for (LENGTH section) while still capping worst
+        # case well short of n_ctx.
+        "max_tokens": 600,
         # The chat template's eos_token (<|im_end|>) is what should stop
         # generation, but a small quantized model occasionally drifts past it
         # and starts emitting the literal text of the NEXT turn's role marker
@@ -93,7 +113,27 @@ registry.register(
         # every time a question repeated; a little temperature plus repeat
         # penalty keeps answers fresh without derailing tool-call syntax.
         "temperature": 0.3,
-        "repeat_penalty": 1.1,
+        # 1.1 alone was observed to NOT be enough to break a strong
+        # repetition attractor in this 2B model - a live session saw it
+        # regenerate one identical paragraph 25+ times in a single answer
+        # with no EOS and no stop-string match, eventually overflowing the
+        # context window and crashing the process. Raised repeat_penalty,
+        # and added frequency_penalty (llama-cpp-python's
+        # create_chat_completion has no repeat_last_n window control at
+        # this API level - frequency_penalty is the real, valid knob that
+        # scales with how often a token has already recurred, which is what
+        # actually helps against a whole-paragraph-length repeat).
+        # max_tokens below is the hard backstop regardless of whether
+        # tuning fully prevents the next one.
+        "repeat_penalty": 1.3,
+        "frequency_penalty": 0.4,
+        # Hard ceiling on one answer's length. Without this, a degenerate
+        # repetition loop has nothing to stop it except the context window
+        # itself filling up (see above) - that's a crash, not a bounded
+        # failure. 600 tokens is generous for the 250-word soft limit the
+        # system prompt asks for (LENGTH section) while still capping worst
+        # case well short of n_ctx.
+        "max_tokens": 600,
         # The chat template's eos_token (<|im_end|>) is what should stop
         # generation, but a small quantized model occasionally drifts past it
         # and starts emitting the literal text of the NEXT turn's role marker

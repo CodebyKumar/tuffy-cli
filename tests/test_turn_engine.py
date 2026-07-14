@@ -10,7 +10,7 @@ import pytest
 
 from src.engine import tool_dispatch, turn_engine
 from src.engine.errors import OutOfMemoryError
-from src.engine.events import Done, Failed, Status, Thought, Token, ToolCall, ToolResult
+from src.engine.events import AnswerStart, Done, Failed, Status, Thought, Token, ToolCall, ToolResult
 from src.llm.base import ProviderError
 from src.tools.registry import registry
 from tests.fakes import FakeProvider
@@ -67,6 +67,20 @@ class TestNormalAnswer:
         assert thoughts[0].text == "internal reasoning"
         tokens = only(events, Token)
         assert "internal reasoning" not in "".join(t.text for t in tokens)
+
+    def test_final_response_tag_propagates_answer_start_through_the_full_loop(self):
+        """AnswerStart must reach a real caller (src/cli/turn.py) through the
+        whole run_turn -> _stream_one_completion -> StreamParser chain, not
+        just in isolated StreamParser unit tests - this is what turn.py's
+        renderer actually keys off of to retire the spinner before answer
+        text streams."""
+        events, _ = run(["<think>plan</think><final_response>Hi there</final_response>"])
+        answer_starts = only(events, AnswerStart)
+        assert len(answer_starts) == 1
+        tokens = only(events, Token)
+        assert "".join(t.text for t in tokens) == "Hi there"
+        done = only(events, Done)
+        assert done[0].full_text == "Hi there"
 
     def test_done_event_carries_final_text_for_caller_to_persist(self):
         # run_turn deliberately does NOT append the final answer to
@@ -148,15 +162,37 @@ class TestToolFailureRecovery:
         done = only(events, Done)
         assert done[0].full_text == "Sorry, that didn't work."
 
-    def test_unknown_tool_name_reported_and_recoverable(self, clean_registry):
+    def test_unknown_tool_name_treated_as_no_tool_needed_not_an_error(self, clean_registry):
+        """A <tool_call> naming something that isn't a real, registered tool
+        (hallucinated name, stray phrase like "no tool needed", etc.) is
+        treated as the model meaning to skip the tool - not surfaced as a
+        failed ToolResult/scolding Observation, since there's no real failure
+        to react to. No hardcoded phrase list: this is purely "is the name in
+        the live tool registry"."""
         script = [
             '<tool_call>{"name": "does_not_exist", "arguments": {}}</tool_call>',
             "I don't have that capability.",
         ]
         events, messages = run(script)
-        results = only(events, ToolResult)
-        assert not results[0].ok
-        assert "does not exist" in results[0].result
+        assert not only(events, ToolResult), "an unknown tool name must not produce a ToolResult event"
+        done = only(events, Done)
+        assert done[0].full_text == "I don't have that capability."
+        nudges = [m for m in messages if m.get("role") == "user" and "wasn't a real tool" in m.get("content", "")]
+        assert nudges, "the model should be nudged to answer directly, not shown a tool-failure Observation"
+
+    def test_no_tool_needed_as_tool_name_handled_same_as_any_unknown_name(self, clean_registry):
+        """Original bug report: a small model echoing the "no tool needed"
+        wording from prompt examples into the tool_call's name field must
+        not be dispatched, and must not require a hardcoded phrase check -
+        it's just another name absent from the registry."""
+        script = [
+            '<tool_call>{"thought": "just chatting", "name": "no tool needed", "arguments": {"arg": "hi"}}</tool_call>',
+            "Hey! What can I do for you?",
+        ]
+        events, messages = run(script)
+        assert not only(events, ToolResult)
+        done = only(events, Done)
+        assert done[0].full_text == "Hey! What can I do for you?"
 
     def test_self_correction_after_failure_still_succeeds(self, clean_registry):
         calls = {"n": 0}
@@ -248,6 +284,93 @@ class TestDegenerateReply:
         assert "".join(t.text for t in tokens) == "Real answer now."
         done = only(events, Done)
         assert done[0].full_text == "Real answer now."
+
+
+    def test_degenerate_reply_after_tool_result_forces_final_instead_of_retrying(self, clean_registry):
+        """Regression test: after a tool Observation is fed back, a degenerate
+        reply must go straight to a forced final answer (one extra
+        completion), not loop through another retry-correction hop first.
+        Retrying in this spot was observed in practice to cascade into a
+        string of ever-shorter "thinking..." fragments rather than
+        recovering. The script below has exactly 3 entries: the tool call, a
+        degenerate reply (hop 1), then the forced-final completion
+        (_final_answer_guaranteed's own extra completion). If the engine
+        instead took the retry_degenerate path, it would insert an *extra*
+        hop consuming a 4th script entry, and FakeProvider would raise
+        'script exhausted' instead of the turn ending cleanly on the 3rd."""
+        _register("get_time", lambda: "3:00pm", required=[])
+        script = [
+            '<tool_call>{"name": "get_time", "arguments": {}}</tool_call>',
+            "...",  # degenerate: no word characters
+            "Forced final answer.",
+        ]
+        events, messages = run(script)  # must not raise "script exhausted"
+        done = only(events, Done)
+        assert done, "turn must still end in Done, not hang or crash"
+        assert done[0].full_text == "Forced final answer."
+
+
+class TestRefusalWithoutToolAttempt:
+    def test_untried_refusal_retries_with_tool_list_then_succeeds(self, clean_registry):
+        _register("read_file", lambda filename: "file contents", required=["filename"])
+        script = [
+            "<think>hmm</think>I don't have access to that file. Could you share the code?",
+            '<think>oh right</think><tool_call>{"name": "read_file", "arguments": {"filename": "x.py"}}</tool_call>',
+            "<think>ok</think>Here's what it does.",
+        ]
+        events, messages = run(script)
+        done = only(events, Done)
+        assert done[0].full_text == "Here's what it does."
+        calls = only(events, ToolCall)
+        assert calls[0].name == "read_file"
+        corrections = [
+            m["content"] for m in messages
+            if m.get("role") == "user" and "that was a refusal" in m.get("content", "")
+        ]
+        assert len(corrections) == 1
+        assert "read_file" in corrections[0]
+
+    def test_refusal_only_retried_once_per_turn(self, clean_registry):
+        _register("read_file", lambda filename: "file contents", required=["filename"])
+        script = [
+            "<think>hmm</think>I don't have access to that file.",
+            "<think>still stuck</think>I can't access that file either.",
+        ]
+        events, messages = run(script)
+        done = only(events, Done)
+        assert done[0].full_text == "I can't access that file either."
+        corrections = [
+            m["content"] for m in messages
+            if m.get("role") == "user" and "that was a refusal" in m.get("content", "")
+        ]
+        assert len(corrections) == 1, "must not keep re-nudging a model that keeps refusing"
+
+    def test_refusal_after_tool_result_is_not_retried(self, clean_registry):
+        """A refusal-shaped sentence right after a real Observation (e.g.
+        summarizing that the tool itself found nothing) must not be treated
+        as an untried refusal - just_saw_tool_result already guards the
+        degenerate/foreign paths the same way; this mirrors that."""
+        _register("read_file", lambda filename: "not found", required=["filename"])
+        script = [
+            '<tool_call>{"name": "read_file", "arguments": {"filename": "x.py"}}</tool_call>',
+            "I don't have access to more detail than what the tool returned.",
+        ]
+        events, messages = run(script)
+        done = only(events, Done)
+        assert done[0].full_text == "I don't have access to more detail than what the tool returned."
+        corrections = [
+            m["content"] for m in messages
+            if m.get("role") == "user" and "that was a refusal" in m.get("content", "")
+        ]
+        assert not corrections
+
+    def test_no_registered_tools_never_triggers_refusal_retry(self, clean_registry):
+        registry.functions = {}
+        registry.schemas = []
+        script = ["<think>ok</think>I don't have access to that."]
+        events, messages = run(script)
+        done = only(events, Done)
+        assert done[0].full_text == "I don't have access to that."
 
 
 class TestForeignScript:

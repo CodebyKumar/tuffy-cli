@@ -23,16 +23,19 @@ once, in one place)."""
 import re
 from dataclasses import dataclass, field
 
-from src.engine.events import Thought, Token
+from src.engine.events import AnswerStart, Thought, Token
 
 _TOOL_CALL_PATTERN = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 _THINK_PATTERN = re.compile(r"<think>\s*(.*?)\s*</think>", re.DOTALL)
+_FINAL_RESPONSE_PATTERN = re.compile(r"<final_response>\s*(.*?)\s*</final_response>", re.DOTALL)
 
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
 _TOOL_CALL_OPEN = "<tool_call>"
+_FINAL_RESPONSE_OPEN = "<final_response>"
+_FINAL_RESPONSE_CLOSE = "</final_response>"
 
-_TAG_OPENS = (_THINK_OPEN, _TOOL_CALL_OPEN)
+_TAG_OPENS = (_THINK_OPEN, _TOOL_CALL_OPEN, _FINAL_RESPONSE_OPEN)
 
 # Scripts the model cannot write reliably itself (Greek/Cyrillic through
 # Indic through CJK). Symbols, punctuation and emoji are deliberately outside
@@ -109,6 +112,7 @@ class StreamParser:
         self._sourced_text = sourced_text
         self._pending = ""
         self._in_think = False
+        self._in_final_response = False
         self._tool_call_found = False
         self._suppressed = False
         self._degenerate_start = False
@@ -116,6 +120,7 @@ class StreamParser:
         self._pending_start = ""
         self._full_text = ""
         self._dropped_unclosed_think = False
+        self._answer_start_emitted = False
 
     def _unsourced_foreign(self, text: str) -> bool:
         chars = set(_FOREIGN_SCRIPT_PATTERN.findall(text))
@@ -147,6 +152,24 @@ class StreamParser:
             return
         events.append(Token(text))
 
+    def _flush_final_response(self, text: str, events: list):
+        """Streams text known to be inside <final_response>...</final_response>
+        directly as Token events - no degenerate-start holdback/buffering,
+        since the tag itself is the model's explicit signal this is real
+        answer content, not something that might still turn into a stray
+        role-label leak. Foreign-script suppression still applies (the
+        model still can't reliably hand-write non-Latin script)."""
+        if not text or self._suppressed:
+            return
+        if not self._answer_start_emitted:
+            events.append(AnswerStart())
+            self._answer_start_emitted = True
+            self._flushed_anything = True
+        if self._unsourced_foreign(text):
+            self._suppressed = True
+            return
+        events.append(Token(text))
+
     def feed(self, delta: str) -> list:
         events = []
         if not delta:
@@ -170,9 +193,31 @@ class StreamParser:
                 self._in_think = False
                 continue
 
+            if self._in_final_response:
+                close_idx = self._pending.find(_FINAL_RESPONSE_CLOSE)
+                if close_idx == -1:
+                    # Hold back only the shortest tail that could still be
+                    # the start of the closing tag - same trick as the
+                    # opener scan below, so real content streams live
+                    # instead of waiting for the whole answer to buffer.
+                    safe_len = len(self._pending)
+                    for k in range(min(len(_FINAL_RESPONSE_CLOSE), len(self._pending)), 0, -1):
+                        if self._pending[-k:] == _FINAL_RESPONSE_CLOSE[:k]:
+                            safe_len = min(safe_len, len(self._pending) - k)
+                            break
+                    if safe_len > 0:
+                        self._flush_final_response(self._pending[:safe_len], events)
+                        self._pending = self._pending[safe_len:]
+                    break
+                self._flush_final_response(self._pending[:close_idx], events)
+                self._pending = self._pending[close_idx + len(_FINAL_RESPONSE_CLOSE):]
+                self._in_final_response = False
+                continue
+
             think_idx = self._pending.find(_THINK_OPEN)
             call_idx = self._pending.find(_TOOL_CALL_OPEN)
-            candidates = [i for i in (think_idx, call_idx) if i != -1]
+            final_idx = self._pending.find(_FINAL_RESPONSE_OPEN)
+            candidates = [i for i in (think_idx, call_idx, final_idx) if i != -1]
             if not candidates:
                 safe_len = len(self._pending)
                 for opener in _TAG_OPENS:
@@ -186,6 +231,11 @@ class StreamParser:
                 break
 
             first_idx = min(candidates)
+            # Text before ANY tag (<think>, <tool_call>, or <final_response>
+            # itself) still goes through the old buffered path (degenerate-
+            # start detection etc.) - only content INSIDE <final_response>
+            # gets the new unbuffered treatment, applied separately once
+            # _in_final_response is set below.
             self._flush(self._pending[:first_idx], events)
             if self._suppressed:
                 break
@@ -193,6 +243,10 @@ class StreamParser:
             if first_idx == think_idx:
                 self._pending = self._pending[first_idx + len(_THINK_OPEN):]
                 self._in_think = True
+                continue
+            elif first_idx == final_idx:
+                self._pending = self._pending[first_idx + len(_FINAL_RESPONSE_OPEN):]
+                self._in_final_response = True
                 continue
             else:
                 self._tool_call_found = True
@@ -229,6 +283,17 @@ class StreamParser:
             self._in_think = False
             self._dropped_unclosed_think = True
 
+        if self._in_final_response:
+            # Generation ended before the closing tag arrived (EOS/stop-
+            # string cut it short, or a length cap hit mid-answer) - the
+            # tag opened, so this IS the answer; flush whatever's left of
+            # it as-is rather than losing it or routing it back through
+            # the buffered/degenerate-holdback path meant for un-tagged
+            # text.
+            self._flush_final_response(self._pending, events)
+            self._pending = ""
+            self._in_final_response = False
+
         if not self._tool_call_found and not self._suppressed and self._pending:
             self._flush(self._pending, events)
 
@@ -241,7 +306,22 @@ class StreamParser:
                 self._flushed_anything = True
                 events.append(Token(self._pending_start))
 
-        full_text = _THINK_PATTERN.sub("", self._full_text).strip()
+        final_response_match = _FINAL_RESPONSE_PATTERN.search(self._full_text)
+        if final_response_match:
+            # The model used the tag: that's the authoritative answer text,
+            # regardless of whatever else surrounds it (a stray sentence
+            # before/after the tag some small models occasionally still
+            # emit is deliberately NOT included - the tag is the contract).
+            full_text = final_response_match.group(1).strip()
+        else:
+            full_text = _THINK_PATTERN.sub("", self._full_text).strip()
+            # An unclosed <final_response> (caught above) leaves its content
+            # in _full_text but with no matching closing tag for the regex
+            # to find - fall back to stripping from the open tag onward.
+            open_idx = full_text.find(_FINAL_RESPONSE_OPEN)
+            if open_idx != -1:
+                full_text = full_text[open_idx + len(_FINAL_RESPONSE_OPEN):].strip()
+
         if not self._tool_call_found:
             # Mirror the live-stream cleanup in what gets SAVED as the
             # assistant's turn: drop leading filler lines, and if the whole

@@ -62,7 +62,8 @@ def parse_tool_call(tool_call_json: str) -> tuple[str, dict, str]:
     function_args = tool_info.get("arguments", {}) or {}
     thought = str(tool_info.get("thought", "")).strip()
 
-    if not function_name or function_name in ("tool_name", "exact_tool_name"):
+    function_name = str(function_name).strip() if function_name is not None else ""
+    if not function_name:
         raise ToolExecutionError(
             f"no real tool name given — use an exact name from the TOOLS list; {_EXPECTED_FORMAT}"
         )

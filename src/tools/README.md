@@ -10,9 +10,10 @@ needs to change to make a new tool visible to the model.
 - [editing.py](editing.py) - `save_to_file`/`read_file`/`list_workspace_files`/`edit_file`, plus
   `safe_workspace_path()` — the sandbox boundary every workspace-touching tool (including
   `coding.py`) resolves paths through. Group: `editing`.
-- [coding.py](coding.py) - `run_python`, `run_shell` (fixed command allowlist, not a blocklist),
-  `git_status`/`git_diff`/`git_commit` — all scoped to the workspace directory with a short
-  timeout. Group: `coding`.
+- [coding.py](coding.py) - `run_python`, `run_shell` (fixed command allowlist, not a blocklist) —
+  scoped to the workspace directory with a short timeout. No `git` tools: `agent_workspace/` isn't
+  its own git repo, so a git command there would walk up to Tuffy's own project `.git` instead of
+  staying sandboxed. Group: `coding`.
 - [research.py](research.py) - `web_search`, `get_datetime`, `translate`. Group: `research`.
 - [system.py](system.py) - `get_system_stats`, `top_processes`, `capture_image`, `view_image`.
   Group: `system`.

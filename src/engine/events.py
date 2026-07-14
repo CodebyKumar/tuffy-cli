@@ -41,6 +41,17 @@ class ToolResult:
 
 
 @dataclass(frozen=True)
+class AnswerStart:
+    """The model has opened <final_response> - the final answer is about to
+    stream as Token events. Fires BEFORE any of that content arrives, so a
+    renderer can retire status UI (e.g. a spinner) deterministically instead
+    of inferring "answer started" from the first Token itself, which races
+    against still-updating status output when the model's first answer
+    chars happen to contain symbols/newlines a spinner's own redraw logic
+    wasn't expecting mid-frame."""
+
+
+@dataclass(frozen=True)
 class Token:
     """One piece of the final answer, safe to print immediately."""
     text: str
@@ -65,4 +76,4 @@ class Failed:
     recoverable: bool = True
 
 
-TurnEvent = Status | Thought | ToolCall | ToolResult | Token | Done | Failed
+TurnEvent = Status | Thought | ToolCall | ToolResult | AnswerStart | Token | Done | Failed

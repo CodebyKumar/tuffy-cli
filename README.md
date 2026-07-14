@@ -17,9 +17,9 @@ MCP servers, skills, tools). Most folders below have their own README with more 
   the same way. See [docs/configure-models.md](docs/configure-models.md).
 - **Grouped tools**: Tools are organized by domain — Editing & Files, Coding & Execution,
   Research & Lookup, System, Memory — shown with headers in `/tools` and the system prompt.
-- **Coding & editing**: `edit_file` for targeted changes (not just whole-file overwrites),
-  `run_python`/`run_shell` (sandboxed, allowlisted) and `git_status`/`git_diff`/`git_commit` for
-  working on real code in the workspace.
+- **Coding & editing**: `edit_file` for targeted changes (not just whole-file overwrites) and
+  `run_python`/`run_shell` (sandboxed, allowlisted — no `git`, see
+  [src/tools/README.md](src/tools/README.md)) for working on real code in the workspace.
 - **Skills**: drop a folder with a `SKILL.md` into `./.tuffy/skills/<name>/` to teach Tuffy how to
   approach a kind of task (optionally shipping its own tools or an MCP server to connect) — no
   core code changes needed. See `/skills` and [docs/configure-skills.md](docs/configure-skills.md).
@@ -53,11 +53,12 @@ Run `/help` inside Tuffy for the full categorized list, or see
 - `/tools` - List all tools the agent can call, grouped by domain.
 - `/skills` - List installed skills (drop new ones in `./.tuffy/skills/<name>/`).
 - `/mcp` - List connected MCP servers and the tools they registered.
+- `/mcp add <github-url>` / `/mcp remove <name>` - Add or remove an MCP server without hand-editing config.
 - `/status` - Show the active model, vision support, turn count, estimated context usage, and rate limits (API models).
 
 **Models**
 - `/models` - List available models (local and API) and show which one is active.
-- `/models <id>` - Switch to a different model (local or API), unloading the current one.
+- `/models switch <id>` - Switch to a different model (local or API), unloading the current one. `/models <id>` also works as shorthand.
 - `/models default <id>` - Switch to a model and persist it as the startup default.
 - `/models info <id>` - Show a model's full model card, including provider/API details.
 

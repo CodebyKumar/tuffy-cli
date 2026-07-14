@@ -17,7 +17,7 @@ import contextlib
 
 import pytest
 
-from src.cli.session import Session
+from src.cli.session import Session, TurnHealth
 from src.cli.turn import run_turn
 from src.engine.model_agent import ModelAgent
 from src.models.registry import registry as model_registry
@@ -95,6 +95,7 @@ def _fake_session(script) -> Session:
     session.current_model_id = _FAKE_MODEL_ID
     session.pending_image_data_uri = None
     session.captured_images = []
+    session.health = TurnHealth()
     session.messages = [session.system_message()]
     return session
 

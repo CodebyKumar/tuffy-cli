@@ -21,16 +21,35 @@ usable after every guard and retry — becomes a single Failed event with a
 except a genuine programming bug (which should crash loudly in development,
 not be silently swallowed)."""
 
+import re
+
 from src.memory import add_lesson
-from src.engine.errors import OutOfMemoryError, ToolExecutionError
+from src.engine.errors import ContextOverflowError, OutOfMemoryError, ToolExecutionError
 from src.engine.events import Done, Failed, Status, ToolResult
 from src.engine.stream_parser import StreamParser
 from src.engine import tool_dispatch
 from src.llm.base import ProviderError
 from src.prompts import templates
+from src.tools.registry import registry
 from src.vision import IMAGE_SENTINEL
 
 _MAX_TOOL_HOPS = 4
+
+# Deliberately narrow: only the clearest "I can't do X" / "I don't have
+# access to X" refusal phrasings, anchored so a legitimate answer that
+# merely discusses access/capability in passing isn't caught. False
+# negatives (a refusal phrased some other way slipping through) are fine -
+# this only needs to catch the common case observed in practice, not every
+# way a small model can decline to try.
+_REFUSAL_PATTERN = re.compile(
+    r"\b(i (don'?t|do not) have access to|i (can'?t|cannot) (access|see|view|read)\b"
+    r"|could you (please )?(share|provide|paste|send) the)",
+    re.IGNORECASE,
+)
+
+
+def _is_untried_refusal(text: str) -> bool:
+    return bool(_REFUSAL_PATTERN.search(text))
 
 _FALLBACK_ANSWER = (
     "I wasn't able to finish that with the tools available — could you "
@@ -81,6 +100,17 @@ def run_turn(provider, sampling_params: dict, messages: list):
     # pointless as a literal repeat, since the first result usually already
     # answers the question.
     tool_last_output: dict[str, str] = {}
+    # Once a tool Observation has been fed back, a degenerate/foreign reply
+    # on the very next hop means the model is spiraling against that specific
+    # context (seen in practice as a cascade of ever-shorter "thinking..."
+    # fragments) rather than needing another retry - go straight to a forced
+    # final answer instead of compounding more retry-correction prompts onto
+    # an already-troubled context.
+    just_saw_tool_result = False
+    # Only offered once per turn - if the model still refuses after being
+    # shown the tool list explicitly, repeating the same nudge won't help
+    # and risks looping; let it stand on the second refusal instead.
+    refusal_retry_offered = False
 
     try:
         for hop in range(_MAX_TOOL_HOPS):
@@ -94,17 +124,40 @@ def run_turn(provider, sampling_params: dict, messages: list):
 
             if not result.is_tool_call:
                 outcome = _handle_final_text(result, is_last_hop)
+                if just_saw_tool_result and outcome in ("retry_degenerate", "retry_foreign"):
+                    outcome = "force_final"
+                if (
+                    outcome == "return_done"
+                    and not is_last_hop
+                    and not refusal_retry_offered
+                    and not just_saw_tool_result
+                    and registry.functions
+                    and _is_untried_refusal(result.full_text)
+                ):
+                    outcome = "retry_refusal"
                 if outcome == "return_done":
                     yield Done(result.full_text)
                     return
+                if outcome == "retry_refusal":
+                    yield Status("retrying with tools")
+                    messages.append({"role": "assistant", "content": result.full_text})
+                    messages.append({
+                        "role": "user",
+                        "content": templates.refusal_without_tool_correction(registry.tool_lines()),
+                    })
+                    refusal_retry_offered = True
+                    just_saw_tool_result = False
+                    continue
                 if outcome == "retry_degenerate":
                     yield Status("retrying")
                     messages.append({"role": "user", "content": templates.degenerate_reply_correction()})
+                    just_saw_tool_result = False
                     continue
                 if outcome == "retry_foreign":
                     yield Status("rewriting via translate")
                     messages.append({"role": "assistant", "content": result.full_text})
                     messages.append({"role": "user", "content": templates.foreign_script_correction()})
+                    just_saw_tool_result = False
                     continue
                 if outcome == "force_final":
                     text = yield from _final_answer_guaranteed(provider, sampling_params, messages)
@@ -116,11 +169,30 @@ def run_turn(provider, sampling_params: dict, messages: list):
                 return
 
             messages.append({"role": "assistant", "content": result.full_text})
+            just_saw_tool_result = False
 
             try:
                 function_name, function_args, thought = tool_dispatch.parse_tool_call(result.tool_call_json or "")
             except ToolExecutionError as e:
                 yield from _handle_tool_failure(str(e), None, is_last_hop, messages, failed_tools)
+                if is_last_hop:
+                    text = yield from _final_answer_guaranteed(provider, sampling_params, messages)
+                    yield Done(text)
+                    return
+                continue
+
+            if function_name not in registry.functions:
+                # A <tool_call> tag naming something that isn't a real,
+                # registered tool (blank, hallucinated, or a stray phrase
+                # like "no tool needed" echoed from prompt wording) means the
+                # model meant to skip the tool - not a failure worth
+                # surfacing as a tool-error Observation. No hardcoded phrase
+                # list: this is a purely structural "is it a real tool name"
+                # check against the live registry.
+                messages.append({
+                    "role": "user",
+                    "content": templates.no_tool_needed_nudge(is_last_hop),
+                })
                 if is_last_hop:
                     text = yield from _final_answer_guaranteed(provider, sampling_params, messages)
                     yield Done(text)
@@ -193,6 +265,7 @@ def run_turn(provider, sampling_params: dict, messages: list):
                     "role": "user",
                     "content": reminder_prefix + templates.tool_output_prompt(function_name, tool_output, is_last_hop),
                 })
+            just_saw_tool_result = True
 
             if is_last_hop:
                 text = yield from _final_answer_guaranteed(provider, sampling_params, messages)
@@ -201,6 +274,8 @@ def run_turn(provider, sampling_params: dict, messages: list):
 
     except OutOfMemoryError as e:
         yield Failed(kind="oom", message=str(e))
+    except ContextOverflowError as e:
+        yield Failed(kind="context_overflow", message=str(e))
     except ProviderError as e:
         yield Failed(kind="provider", message=str(e))
     except GeneratorExit:

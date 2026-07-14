@@ -1,9 +1,9 @@
-"""StreamParser: the incremental <think>/<tool_call> tag scanner and the
-degenerate-reply / foreign-script guards. Fed one delta at a time to mimic
-real token-by-token streaming, including deltas that split a tag across a
-chunk boundary."""
+"""StreamParser: the incremental <think>/<tool_call>/<final_response> tag
+scanner and the degenerate-reply / foreign-script guards. Fed one delta at a
+time to mimic real token-by-token streaming, including deltas that split a
+tag across a chunk boundary."""
 
-from src.engine.events import Thought, Token
+from src.engine.events import AnswerStart, Thought, Token
 from src.engine.stream_parser import StreamParser
 
 
@@ -176,6 +176,94 @@ class TestFillerReplies:
         events, result = run(["…"])
         assert text_of(events) == ""
         assert result.degenerate_start
+
+
+class TestFinalResponseTag:
+    def test_simple_tagged_answer(self):
+        events, result = run(["<think>plan</think><final_response>Hi there</final_response>"])
+        assert text_of(events) == "Hi there"
+        assert result.full_text == "Hi there"
+        assert not result.is_tool_call
+
+    def test_answer_start_fires_before_any_token_of_the_tagged_content(self):
+        events, result = run(["<think>plan</think><final_response>Hello world</final_response>"])
+        answer_start_idx = next(i for i, e in enumerate(events) if isinstance(e, AnswerStart))
+        first_token_idx = next(i for i, e in enumerate(events) if isinstance(e, Token))
+        assert answer_start_idx < first_token_idx
+
+    def test_answer_start_fires_exactly_once(self):
+        events, result = run(["<final_response>one</final_response>", "trailing stray text"])
+        assert sum(1 for e in events if isinstance(e, AnswerStart)) == 1
+
+    def test_tag_split_across_chunks(self):
+        # "Hi\n" before the tag still flushes through the old buffered path
+        # (see test_content_before_tag_goes_through_old_buffered_path) and
+        # is shown live, but full_text (what gets SAVED to history) is
+        # authoritatively just the tagged content - this test's focus is
+        # that the OPEN tag itself, split across chunk boundaries, is still
+        # recognized correctly.
+        events, result = run(["Hi\n<final_resp", "onse>answer here</final_resp", "onse>"])
+        assert "answer here" in text_of(events)
+        assert result.full_text == "answer here"
+
+    def test_multiline_content_with_backslashes_and_pipes_streams_intact(self):
+        """Regression test: a live session hit garbled terminal output when
+        the model's final answer was a markdown code fence containing
+        backslashes and pipe characters (a bird-drawing ASCII-art script) -
+        traced to the spinner's own row-clearing logic racing against the
+        first Token doubling as the "answer started" signal. The tag +
+        AnswerStart fix means this content is never involved in that race:
+        confirm it streams through completely unmangled regardless."""
+        answer = (
+            "```python\n"
+            "print('   \\\\|/')\n"
+            "print('  /     \\\\\\\\')\n"
+            "```\n"
+            "This prints a simple bird shape."
+        )
+        events, result = run([f"<think>writing code</think><final_response>{answer}</final_response>"])
+        assert text_of(events) == answer
+        assert result.full_text == answer
+
+    def test_closing_tag_split_across_chunks_holds_back_only_the_ambiguous_tail(self):
+        # '</final_response>' arriving split must not leak the partial
+        # closing-tag characters as literal answer text.
+        events, result = run(["<final_response>answer</final_resp", "onse>"])
+        assert text_of(events) == "answer"
+        assert result.full_text == "answer"
+
+    def test_unclosed_final_response_at_stream_end_still_flushes(self):
+        # Generation cut off (max_tokens/EOS) before the closing tag arrived
+        # - the tag opened, so this IS the answer; it must not be lost or
+        # routed back through degenerate-reply detection.
+        events, result = run(["<final_response>partial answer that never closes"])
+        assert text_of(events) == "partial answer that never closes"
+        assert result.full_text == "partial answer that never closes"
+        assert not result.degenerate_start
+
+    def test_untagged_reply_still_works_unchanged(self):
+        """Backward compatibility: a model that forgets the tag (small
+        models won't comply 100% of the time) must fall back to exactly the
+        old untagged behavior, not break or lose the answer."""
+        events, result = run(["<think>plan</think>Hi there, no tag used"])
+        assert text_of(events) == "Hi there, no tag used"
+        assert result.full_text == "Hi there, no tag used"
+        assert not any(isinstance(e, AnswerStart) for e in events)
+
+    def test_foreign_script_inside_tag_still_suppressed(self):
+        events, result = run(["<final_response>Hello\nこんにちは, how are you</final_response>"])
+        assert result.suppressed_foreign
+
+    def test_content_before_tag_goes_through_old_buffered_path(self):
+        # Only content INSIDE <final_response> gets the new unbuffered
+        # AnswerStart treatment; a stray sentence before the tag (small
+        # model preamble) still goes through the existing degenerate-start
+        # buffering and is shown live too, but full_text (what gets SAVED)
+        # is authoritatively just the tagged content once the tag is used.
+        events, result = run(["Sure thing.\n<final_response>Real answer</final_response>"])
+        assert "Sure thing." in text_of(events)
+        assert "Real answer" in text_of(events)
+        assert result.full_text == "Real answer"
 
 
 class TestForeignScript:

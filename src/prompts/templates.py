@@ -16,12 +16,12 @@ from src import identity
 # they were real input (an earlier example literally caused the agent to
 # view_image('/Users/me/Desktop/screenshot.png')).
 _REACT_EXAMPLES = """\
-Every Assistant turn below starts with a <think> block — this is mandatory on every reply, tool call or not.
+Every Assistant turn below starts with a <think> block — this is mandatory on every reply, tool call or not. Every reply that isn't a <tool_call> wraps its actual answer in <final_response>...</final_response> — nothing outside <think> and <final_response> tags, ever.
 
-Example — no tool needed:
+Example — plain reply, no <tool_call> tag at all:
 User: hey, how's it going?
-Assistant: <think>Just a greeting, no tool needed.</think>
-All good — what can I do for you?
+Assistant: <think>Just a greeting.</think>
+<final_response>All good — what can I do for you?</final_response>
 
 Example — one tool:
 User: <something you need a tool for>
@@ -31,7 +31,7 @@ Assistant: <think>brief reasoning about what's needed</think>
 </tool_call>
 (after the Observation comes back)
 Assistant: <think>brief reasoning grounded in the observation</think>
-<final answer grounded in the observation>
+<final_response><final answer grounded in the observation></final_response>
 
 Example — chained tools:
 User: <something needing two steps, e.g. look something up then translate it>
@@ -45,7 +45,7 @@ Assistant: <think>now convert/refine with tool B</think>
 {"thought": "now convert/refine with tool B", "name": "<tool B>", "arguments": {...}}
 </tool_call>
 (Observation B comes back)
-Assistant: <final answer>"""
+Assistant: <final_response><final answer></final_response>"""
 
 
 def self_model(model_card: dict) -> str:
@@ -131,16 +131,17 @@ def tool_output_prompt(function_name: str, tool_output: str, is_last_hop: bool) 
     """The ReAct Observation message appended after a tool call succeeds."""
     if is_last_hop:
         next_step = (
-            "You have no tool calls left. Give your final answer now, in plain text, "
-            "grounded in this observation — respond to what the user actually asked, "
-            "don't just repeat the observation back."
+            "You have no tool calls left. Give your final answer now, wrapped in "
+            "<final_response>...</final_response>, grounded in this observation — "
+            "respond to what the user actually asked, don't just repeat the observation back."
         )
     else:
         next_step = (
             "Decide: if you still need another step, respond with ONLY the next "
-            "<tool_call> (with a fresh thought). Otherwise give your final answer in "
-            "plain text, grounded in this observation — respond to what the user "
-            "actually asked, don't just repeat the observation back."
+            "<tool_call> (with a fresh thought). Otherwise give your final answer "
+            "wrapped in <final_response>...</final_response>, grounded in this "
+            "observation — respond to what the user actually asked, don't just repeat "
+            "the observation back."
         )
     return f"Observation from {function_name}:\n{tool_output}\n\n{next_step}"
 
@@ -150,13 +151,14 @@ def tool_call_failed(error: str, is_last_hop: bool = True) -> str:
     if is_last_hop:
         return (
             f"Observation: your tool call failed — {error}. You have no tool calls "
-            "left; answer in plain text, briefly explaining what went wrong."
+            "left; answer in <final_response>...</final_response>, briefly explaining "
+            "what went wrong."
         )
     return (
         f"Observation: your tool call failed — {error}. Fix the problem (correct the "
         "tool name or arguments against the TOOLS list) and respond with ONLY the "
-        "corrected <tool_call>. If it can't be fixed by adjusting the call, answer "
-        "in plain text instead."
+        "corrected <tool_call>. If it can't be fixed by adjusting the call, answer in "
+        "<final_response>...</final_response> instead."
     )
 
 
@@ -168,14 +170,14 @@ def repeated_call_blocked(is_last_hop: bool) -> str:
         return (
             "Observation: you already called that exact tool with the same arguments "
             "this turn — running it again won't produce new information. You have no "
-            "tool calls left; answer now in plain text using what you already have, or "
-            "ask the user directly for whatever's missing."
+            "tool calls left; answer now in <final_response>...</final_response> using "
+            "what you already have, or ask the user directly for whatever's missing."
         )
     return (
         "Observation: you already called that exact tool with the same arguments this "
         "turn — running it again won't produce new information. Either try a genuinely "
         "different tool/arguments, ask the user directly for what's missing, or answer "
-        "now in plain text."
+        "now in <final_response>...</final_response>."
     )
 
 
@@ -192,7 +194,7 @@ def same_tool_called_again_prefix(function_name: str, previous_output: str) -> s
         f"{previous_output}\n\n"
         f"Only call {function_name} again if this new attempt is asking for something "
         "genuinely different — if the result above already answers the user's question, "
-        "answer now in plain text instead.)\n\n"
+        "answer now in <final_response>...</final_response> instead.)\n\n"
     )
 
 
@@ -200,10 +202,28 @@ def force_final_answer() -> str:
     """Used when the hop budget is exhausted: forces a real, non-empty reply
     instead of letting the turn end with nothing shown to the user."""
     return (
-        "You're out of tool calls for this turn. Write your final answer now, in plain "
-        "text. Use whatever you learned from the observations above; if that's not "
-        "enough to fully answer, say what you found so far and what's still missing — "
-        "but you must write something."
+        "You're out of tool calls for this turn. Write your final answer now, wrapped "
+        "in <final_response>...</final_response>. Use whatever you learned from the "
+        "observations above; if that's not enough to fully answer, say what you found "
+        "so far and what's still missing — but you must write something."
+    )
+
+
+def no_tool_needed_nudge(is_last_hop: bool) -> str:
+    """Observation injected when a <tool_call> tag named something that isn't
+    a real tool (blank, hallucinated, or a stray phrase like "no tool
+    needed") - treated as the model meaning to skip the tool entirely rather
+    than a failure worth scolding it over, since there's nothing concrete to
+    correct: it just needs to answer directly instead."""
+    if is_last_hop:
+        return (
+            "That wasn't a real tool, so no tool call happened. Answer directly now, "
+            "wrapped in <final_response>...</final_response>, with no <tool_call> tag."
+        )
+    return (
+        "That wasn't a real tool, so no tool call happened. If you don't need a tool, "
+        "just answer directly, wrapped in <final_response>...</final_response>, with no "
+        "<tool_call> tag at all."
     )
 
 
@@ -216,8 +236,28 @@ def degenerate_reply_correction() -> str:
     retry rather than showing the stray token to the user."""
     return (
         "Observation: your draft answer wasn't a real response — it came out empty "
-        "or as just a stray word. Write your actual answer now, in plain text, "
-        "responding to what the user actually said."
+        "or as just a stray word. Write your actual answer now, wrapped in "
+        "<final_response>...</final_response>, responding to what the user actually said."
+    )
+
+
+def refusal_without_tool_correction(tool_lines: list) -> str:
+    """Observation injected when the model's final text claims it can't do
+    something ("I don't have access to...", "could you share the code?")
+    on a hop where it never attempted a <tool_call> at all - a known 2B-model
+    failure mode where a plausible-sounding refusal is produced instead of
+    reaching for a tool that's sitting right there in TOOLS YOU CAN CALL.
+    Restates the tool list inline (not just "check TOOLS above") since the
+    model already had that context once and skipped it - repeating the exact
+    names gives it something concrete to act on instead of refusing again."""
+    return (
+        "Observation: that was a refusal, not an answer - you said you can't do "
+        "something without ever calling a tool for it. Before answering that way, "
+        "check whether one of your actual tools does this. Available tools:\n"
+        + "\n".join(tool_lines)
+        + "\n\nIf one of them applies, respond with ONLY that <tool_call> now. If none "
+        "of them actually help (not just that you'd rather not), say so plainly in "
+        "<final_response>...</final_response>."
     )
 
 
