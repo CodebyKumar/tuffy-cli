@@ -14,6 +14,7 @@ hooks. src/agent.py never imports llama_cpp or an HTTP client directly — it
 only ever calls through this interface.
 """
 
+import threading
 from abc import ABC, abstractmethod
 
 
@@ -27,6 +28,14 @@ class ProviderError(Exception):
 class LLMProvider(ABC):
     def __init__(self, model_card: dict):
         self.model_card = model_card
+        # llama.cpp's model object isn't safely callable from concurrent
+        # requests (see TurnHealth's docstring in src/cli/session.py for the
+        # prior-incident context). The terminal REPL never needed a guard
+        # because it's structurally single-call-site; a backend process
+        # (multiple WS/REST handlers, elastimem's background completions)
+        # is not. Every subclass's complete()/stream_completion() must hold
+        # this lock for the duration of its call into the underlying model.
+        self.inference_lock = threading.Lock()
 
     @abstractmethod
     def load(self) -> None:

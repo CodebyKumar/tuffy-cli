@@ -42,9 +42,20 @@ def _dump_debug_context(user_input: str, messages: list) -> None:
             f.write(f"  [{i}] {m.get('role')}: {str(content)[:300]}\n")
 
 
-def run_turn(session: Session, user_input: str) -> bool:
-    """Runs one user turn to completion. Returns False if generation was
-    interrupted/failed and the turn was rolled back, True otherwise."""
+def _run_turn_events(session: Session, user_input: str):
+    """Generator doing the actual turn work: history assembly/trimming,
+    driving turn_engine.run_turn, health/memory bookkeeping, and
+    rollback-on-failure — yields each TurnEvent as it happens, plus a
+    trailing sentinel-free "did it succeed" outcome via StopIteration isn't
+    used here (a generator's return value is easy to lose if a caller
+    doesn't fully drain it); instead the caller inspects session state
+    after the generator is exhausted, same as run_turn always has.
+
+    This is the shared core behind both the terminal's run_turn (below,
+    which renders each event to stdout) and tuffy.run_turn_stream (which
+    yields events straight to an external caller) — the exact same
+    trimming/health/memory side effects happen either way, only the
+    rendering differs."""
     memory.mem.tick()
     plan = memory.mem.build_context(user_input)
 
@@ -60,7 +71,6 @@ def run_turn(session: Session, user_input: str) -> bool:
     session.messages = messages = trim_history(messages, plan)
     turn_start = len(messages) - 1
 
-    renderer = _TurnRenderer()
     full_response = ""
     outcome_failed = None
 
@@ -68,7 +78,7 @@ def run_turn(session: Session, user_input: str) -> bool:
         with memory.mem.foreground():
             event_stream = turn_engine.run_turn(session.agent.provider, session.agent.sampling_params, messages)
             for event in event_stream:
-                renderer.render(event)
+                yield event
                 if isinstance(event, Token):
                     full_response += event.text
                 elif isinstance(event, ToolResult):
@@ -79,18 +89,10 @@ def run_turn(session: Session, user_input: str) -> bool:
                     outcome_failed = event
     except KeyboardInterrupt:
         outcome_failed = Failed(kind="interrupted", message="Interrupted")
-    finally:
-        renderer.finish()
+        yield outcome_failed
 
     if outcome_failed is not None:
-        print()
-        _report_failure(outcome_failed)
         session.health.record(outcome_failed.kind)
-        if session.health.should_nudge():
-            print(
-                f"{C_DIM}[{session.health.consecutive_failures()} failed turns in a row on this "
-                f"model — try /models to switch, or /status for details.]{C_RESET}\n"
-            )
         del messages[turn_start:]
         if outcome_failed.kind == "context_overflow":
             # Rolling back this turn's own additions (above) isn't enough —
@@ -102,14 +104,12 @@ def run_turn(session: Session, user_input: str) -> bool:
             # already-too-large plan.keep_last_n_turns that let this
             # happen).
             session.messages = messages = _force_trim(messages, keep_last_n_turns=1)
-        return False
+        return
 
     # The pending image is only cleared once the turn actually succeeded —
     # a failure above leaves it in place so the user doesn't have to
     # re-attach it before retrying.
     session.pending_image_data_uri = None
-
-    print("\n")
 
     if not full_response.strip():
         # Belt-and-suspenders: run_turn is expected to always force a real
@@ -120,8 +120,8 @@ def run_turn(session: Session, user_input: str) -> bool:
         # record.
         del messages[turn_start:]
         session.health.record("empty")
-        print(f"{C_DIM}[No response generated — turn discarded, try again]{C_RESET}\n")
-        return False
+        yield Failed(kind="empty", message="No response generated", recoverable=True)
+        return
 
     messages.append({"role": "assistant", "content": full_response})
     # Drop this turn's ReAct intermediates (tool drafts/observations) — the
@@ -131,6 +131,37 @@ def run_turn(session: Session, user_input: str) -> bool:
     session.health.record(None)
 
     memory.mem.record_turn(user_input, full_response)
+
+
+def run_turn(session: Session, user_input: str) -> bool:
+    """Runs one user turn to completion, rendering each event to stdout as
+    it arrives. Returns False if generation was interrupted/failed and the
+    turn was rolled back, True otherwise."""
+    renderer = _TurnRenderer()
+    outcome_failed = None
+
+    try:
+        for event in _run_turn_events(session, user_input):
+            renderer.render(event)
+            if isinstance(event, Failed):
+                outcome_failed = event
+    finally:
+        renderer.finish()
+
+    if outcome_failed is not None:
+        print()
+        if outcome_failed.kind == "empty":
+            print(f"{C_DIM}[No response generated — turn discarded, try again]{C_RESET}\n")
+        else:
+            _report_failure(outcome_failed)
+            if session.health.should_nudge():
+                print(
+                    f"{C_DIM}[{session.health.consecutive_failures()} failed turns in a row on "
+                    f"this model — try /models to switch, or /status for details.]{C_RESET}\n"
+                )
+        return False
+
+    print("\n")
     return True
 
 

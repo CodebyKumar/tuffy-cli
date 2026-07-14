@@ -116,13 +116,20 @@ class LlamaCppProvider(LLMProvider):
         return self._vision_disabled_reason
 
     def complete(self, **kwargs) -> dict:
-        return self.llm.create_chat_completion(**kwargs)
+        with self.inference_lock:
+            return self.llm.create_chat_completion(**kwargs)
 
     def stream_completion(self, messages: list, **sampling_params):
         params = sampling_params or self.sampling_params
         try:
-            stream = self.llm.create_chat_completion(messages=messages, stream=True, **params)
-            yield from stream
+            # Held for the generator's full lifetime (release happens when
+            # the caller finishes iterating or abandons/GCs the generator),
+            # not just around creating it - create_chat_completion(stream=True)
+            # doesn't touch the model until the first next() pulls a token,
+            # so the lock has to wrap the actual iteration below it.
+            with self.inference_lock:
+                stream = self.llm.create_chat_completion(messages=messages, stream=True, **params)
+                yield from stream
         except RuntimeError as e:
             # llama-cpp-python raises a bare RuntimeError from its C bindings
             # when llama.cpp's decode call returns a negative status — most

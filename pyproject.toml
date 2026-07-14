@@ -23,3 +23,16 @@ elastimem = { git = "https://github.com/CodebyKumar/elastimem.git" }
 dev = [
     "pytest>=9.1.1",
 ]
+
+# tuffy/__init__.py (the public surface external consumers like tuffy-ui
+# import) reaches into src/ at call time, so both must ship as real
+# packages — this project was previously a uv "virtual" root (no
+# [build-system], nothing installable), which is why an external repo's
+# `uv.sources` path dependency couldn't resolve `from tuffy import ...`
+# until now.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tuffy", "src"]
