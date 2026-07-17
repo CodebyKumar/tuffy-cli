@@ -12,7 +12,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
 MARKER_FILE=".venv/.tuffy_cuda_ready"
-PYTHON_VERSION="3.10"
+PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "3.10")
 
 echo "======================================"
 echo " Tuffy Jetson Orin Setup"
@@ -79,22 +79,65 @@ echo
 # `uv sync` run directly in this same process/subshell) are set — belt
 # and suspenders, since the RC-file guard below only applies to *future*
 # shells, not this one.
-SYNC_FLAGS=(--no-install-package llama-cpp-python --extra voice)
-export UV_NO_INSTALL_PACKAGE="llama-cpp-python"
+SYNC_FLAGS=(--no-install-package llama-cpp-python --no-install-package pywhispercpp --no-install-package onnxruntime --inexact --extra voice)
+export UV_NO_INSTALL_PACKAGE="llama-cpp-python,pywhispercpp,onnxruntime"
 
 verify_cuda() {
     .venv/bin/python - <<'PY'
-from llama_cpp import llama_print_system_info
+import sys
+try:
+    import llama_cpp
+except ImportError as e:
+    print(f"ImportError: {e}", file=sys.stderr)
+    sys.exit(1)
 
-info = llama_print_system_info()
+gpu_support = False
+if hasattr(llama_cpp, "llama_supports_gpu_offload") and llama_cpp.llama_supports_gpu_offload():
+    gpu_support = True
 
-if isinstance(info, bytes):
-    info = info.decode()
+try:
+    info = llama_cpp.llama_print_system_info()
+    if info:
+        if isinstance(info, bytes):
+            info = info.decode()
+        if "CUDA" in info.upper() or "GGML_CUDA" in info.upper():
+            gpu_support = True
+        print(info)
+except Exception as e:
+    print(f"Warning: failed to print system info: {e}", file=sys.stderr)
 
-if "CUDA" not in info.upper():
-    raise RuntimeError("CUDA backend not detected")
+if not gpu_support:
+    print("CUDA/GPU backend not detected in llama-cpp-python", file=sys.stderr)
+    sys.exit(1)
+PY
+}
 
-print(info)
+verify_whisper_cuda() {
+    .venv/bin/python - <<'PY'
+import sys
+try:
+    import pywhispercpp.model as m
+    if 'use_gpu' not in m.ContextParams.__annotations__:
+        raise RuntimeError("use_gpu key not found in ContextParams annotations")
+    print("pywhispercpp CUDA verification succeeded")
+except Exception as e:
+    print(f"pywhispercpp CUDA verification failed: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+verify_onnx_gpu() {
+    .venv/bin/python - <<'PY'
+import sys
+try:
+    import onnxruntime as ort
+    providers = ort.get_available_providers()
+    if 'CUDAExecutionProvider' not in providers:
+        raise RuntimeError(f"CUDAExecutionProvider not found in {providers}")
+    print("onnxruntime CUDA verification succeeded")
+except Exception as e:
+    print(f"onnxruntime CUDA verification failed: {e}", file=sys.stderr)
+    sys.exit(1)
 PY
 }
 
@@ -210,10 +253,86 @@ fi
 
 echo
 echo "======================================"
+echo " Validating pywhispercpp CUDA build"
+echo "======================================"
+
+NEED_WHISPER_REBUILD=true
+
+if .venv/bin/python -c "import pywhispercpp" >/dev/null 2>&1 && verify_whisper_cuda >/dev/null 2>&1; then
+    NEED_WHISPER_REBUILD=false
+fi
+
+if [[ "$NEED_WHISPER_REBUILD" == "true" ]]; then
+    echo "pywhispercpp is missing or lacks CUDA support. Building from source..."
+    echo "(This compiles whisper.cpp for Jetson Orin's SM 8.7 GPU.)"
+    echo
+
+    export CMAKE_ARGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=87"
+    export GGML_CUDA=1
+    export WHISPER_CUDA=1
+
+    uv pip uninstall -y pywhispercpp || true
+
+    uv pip install \
+        --force-reinstall \
+        --no-cache-dir \
+        --no-binary pywhispercpp \
+        "pywhispercpp>=1.5.0"
+else
+    echo "pywhispercpp is already compiled with CUDA. Skipping rebuild."
+fi
+
+echo
+echo "======================================"
+echo " Validating onnxruntime-gpu for Jetson"
+echo "======================================"
+
+# Parse JetPack and CUDA version for the Jetson AI Lab wheels index
+L4T_RELEASE=$(head -n 1 /etc/nv_tegra_release | grep -o -E "R[0-9]+") || true
+if [[ "$L4T_RELEASE" == "R36" ]]; then
+    JP_VERSION="jp6"
+elif [[ "$L4T_RELEASE" == "R35" ]]; then
+    JP_VERSION="jp5"
+else
+    JP_VERSION="jp6"
+fi
+
+CUDA_VER=$("$CUDA_HOME/bin/nvcc" --version | grep -i -o -E "release [0-9]+\.[0-9]+" | cut -d' ' -f2) || true
+if [[ -n "$CUDA_VER" ]]; then
+    CUDA_SUFFIX="cu$(echo "$CUDA_VER" | tr -d '.')"
+else
+    CUDA_SUFFIX="cu122"
+fi
+
+JETSON_PIP_INDEX="https://pypi.jetson-ai-lab.io/$JP_VERSION/$CUDA_SUFFIX"
+
+NEED_ONNX_GPU=true
+if verify_onnx_gpu >/dev/null 2>&1; then
+    NEED_ONNX_GPU=false
+fi
+
+if [[ "$NEED_ONNX_GPU" == "true" ]]; then
+    echo "Installing GPU-enabled onnxruntime for Jetson from $JETSON_PIP_INDEX..."
+    echo
+    
+    uv pip uninstall -y onnxruntime || true
+    
+    uv pip install \
+        --extra-index-url "$JETSON_PIP_INDEX" \
+        --no-cache-dir \
+        "onnxruntime-gpu"
+else
+    echo "onnxruntime-gpu is already installed and verified with CUDA support."
+fi
+
+echo
+echo "======================================"
 echo " Final validation"
 echo "======================================"
 
 verify_cuda
+verify_whisper_cuda
+verify_onnx_gpu
 
 current_fingerprint > "$MARKER_FILE"
 
@@ -266,11 +385,11 @@ tuffy() {
 # non-interactive shell that sourced this rc file without going through
 # the uv() function below. Harmless for any other project, since it only
 # ever affects a package actually named llama-cpp-python.
-export UV_NO_INSTALL_PACKAGE="llama-cpp-python"
+export UV_NO_INSTALL_PACKAGE="llama-cpp-python,pywhispercpp,onnxruntime"
 
 uv() {
     if [[ "\$PWD" == "\$TUFFY_HOME"* && "\$1" == "sync" ]]; then
-        command uv sync --no-install-package llama-cpp-python --extra voice "\${@:2}"
+        command uv sync --no-install-package llama-cpp-python --no-install-package pywhispercpp --no-install-package onnxruntime --inexact --extra voice "\${@:2}"
     else
         command uv "\$@"
     fi
