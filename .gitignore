@@ -43,3 +43,4 @@ agent_workspace/
 # API keys / secrets, read directly by src/llm/openai_compatible_provider.py
 .env
 
+uv.lock

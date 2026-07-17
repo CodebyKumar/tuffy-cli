@@ -12,7 +12,8 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_ROOT"
 
 MARKER_FILE=".venv/.tuffy_cuda_ready"
-PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "3.10")
+# Must be 3.10 on Jetson because onnxruntime-gpu wheels from jetson-ai-lab are only built for cp310
+PYTHON_VERSION="3.10"
 
 echo "======================================"
 echo " Tuffy Jetson Orin Setup"
@@ -200,7 +201,15 @@ else
     echo "Build tools and audio libraries already present. Skipping apt install."
 fi
 
-echo
+if [[ -d .venv ]]; then
+    EXISTING_PY_VER=$(.venv/bin/python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "")
+    if [[ "$EXISTING_PY_VER" != "$PYTHON_VERSION" ]]; then
+        echo "Existing virtual environment has Python $EXISTING_PY_VER, but Python $PYTHON_VERSION is required."
+        echo "Re-creating virtual environment..."
+        rm -rf .venv
+    fi
+fi
+
 if [[ ! -d .venv ]]; then
     echo "Creating virtual environment (Python $PYTHON_VERSION)..."
     uv venv --python "$PYTHON_VERSION"
@@ -228,7 +237,11 @@ echo "======================================"
 
 NEED_REBUILD=true
 
-if .venv/bin/python -c "import llama_cpp" >/dev/null 2>&1 && verify_cuda >/dev/null 2>&1; then
+if ! .venv/bin/python -c "import llama_cpp" 2>&1; then
+    echo "llama-cpp-python is not installed or cannot be imported."
+elif ! verify_cuda; then
+    echo "llama-cpp-python is installed, but CUDA/GPU check failed."
+else
     NEED_REBUILD=false
 fi
 
@@ -258,7 +271,11 @@ echo "======================================"
 
 NEED_WHISPER_REBUILD=true
 
-if .venv/bin/python -c "import pywhispercpp" >/dev/null 2>&1 && verify_whisper_cuda >/dev/null 2>&1; then
+if ! .venv/bin/python -c "import pywhispercpp" 2>&1; then
+    echo "pywhispercpp is not installed or cannot be imported."
+elif ! verify_whisper_cuda; then
+    echo "pywhispercpp is installed, but CUDA/GPU check failed."
+else
     NEED_WHISPER_REBUILD=false
 fi
 
@@ -307,7 +324,9 @@ fi
 JETSON_PIP_INDEX="https://pypi.jetson-ai-lab.io/$JP_VERSION/$CUDA_SUFFIX"
 
 NEED_ONNX_GPU=true
-if verify_onnx_gpu >/dev/null 2>&1; then
+if ! verify_onnx_gpu; then
+    echo "onnxruntime-gpu check failed. Re-installing..."
+else
     NEED_ONNX_GPU=false
 fi
 
