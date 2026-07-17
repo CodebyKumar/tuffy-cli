@@ -11,6 +11,7 @@ Every slash command, grouped the same way `/help` groups them inside Tuffy. See
 | `/clear` | Reset the in-window conversation history. Long-term memory (the Elastimem database) is untouched — same effect as `/new`. Use `/purge` to actually wipe memory. |
 | `/purge` | Wipe the long-term memory database: archives the current `tuffy.db` to `data/memory/backups/` and opens a fresh one. Also resets the conversation history. |
 | `/image <path>` | Attach an image file to your next message (requires a vision-capable model). |
+| `/mode [text|voice]` | Show the current active mode, or switch between text and voice modes. |
 
 ## Inspect
 

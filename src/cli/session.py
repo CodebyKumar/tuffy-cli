@@ -285,8 +285,30 @@ class Session:
         """Writes this session into episodic memory, then frees the model."""
         import src.memory as memory
         memory.mem.end_session()
-        self.agent.unload()
-        gc.collect()
+        
+        import contextlib
+        @contextlib.contextmanager
+        def _suppress_stdout_stderr():
+            try:
+                null_fd = os.open(os.devnull, os.O_RDWR)
+                save_stdout = os.dup(1)
+                save_stderr = os.dup(2)
+                os.dup2(null_fd, 1)
+                os.dup2(null_fd, 2)
+                try:
+                    yield
+                finally:
+                    os.dup2(save_stdout, 1)
+                    os.dup2(save_stderr, 2)
+                    os.close(save_stdout)
+                    os.close(save_stderr)
+                    os.close(null_fd)
+            except Exception:
+                yield
+
+        with _suppress_stdout_stderr():
+            self.agent.unload()
+            gc.collect()
 
         # Delete any images captured in this session
         for path in self.captured_images:

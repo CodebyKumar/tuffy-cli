@@ -230,6 +230,16 @@ a `/models` switch), and structurally incapable of being written by the reflecti
 | `commands.py` | One function per slash command + the dispatch table `main.py` calls. |
 | `turn.py` | Drives one user turn: builds messages, iterates `src.engine.turn_engine.run_turn()`, renders each `TurnEvent` (spinner/trace/tokens), folds history back together. |
 
+`src/voice/` provides an alternate voice-interactive CLI wrapper:
+
+| Module | Responsibility |
+|---|---|
+| `assets.py` | Resolves, downloads, and caches local Whisper and Piper model assets to `~/.tuffy/models/`. |
+| `audio.py` | Handles microphone recording and speaker playback, with automatic ALSA/macOS command-line tool fallbacks for complete compatibility on Jetson Orin Nano. |
+| `stt.py` | Performs Speech-to-Text transcription on captured mono float32 PCM using `pywhispercpp`. |
+| `tts.py` | Performs Text-to-Speech synthesis on response text using `piper-tts`, generating mono PCM16 chunks. |
+| `voice_cli.py` | Runs the main voice interactive loop, orchestrating audio capture, STT, LLM streaming, response cleaning, and real-time playback with Enter-key interrupt monitoring. |
+
 `main.py` itself only does two things: startup wiring (skill discovery, MCP connection) and the
 top-level input loop (read a line, dispatch to a command or a chat turn).
 
@@ -252,6 +262,7 @@ src/
   memory.py              Elastimem adapter: learned long-term memory — §2.2
   settings.py            Persisted user settings (.tuffy/settings.json) — default model id
   vision.py               Image encoding + the IMAGE_SENTINEL hand-off protocol
+  voice/                 Voice CLI layer (assets, audio, stt, tts, voice_cli) — §2.3
   llm/
     base.py                LLMProvider interface — §2.2
     llama_cpp_provider.py    Local model-weight backend

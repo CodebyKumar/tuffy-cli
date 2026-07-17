@@ -24,6 +24,7 @@ _HELP_SECTIONS = [
         ("/clear", "wipe current conversation history (keeps long-term memory)"),
         ("/purge", "wipe long-term memory database (archives old DB)"),
         ("/image <path>", "attach an image to your next message (vision models only)"),
+        ("/mode [text|voice]", "show or switch input mode (text or voice)"),
     ]),
     ("Inspect", [
         ("/memory", "show summary, facts, sessions, and lessons from memory"),

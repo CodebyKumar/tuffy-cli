@@ -79,7 +79,7 @@ echo
 # `uv sync` run directly in this same process/subshell) are set — belt
 # and suspenders, since the RC-file guard below only applies to *future*
 # shells, not this one.
-SYNC_FLAGS=(--no-install-package llama-cpp-python)
+SYNC_FLAGS=(--no-install-package llama-cpp-python --extra voice)
 export UV_NO_INSTALL_PACKAGE="llama-cpp-python"
 
 verify_cuda() {
@@ -140,7 +140,7 @@ echo "======================================"
 echo
 
 # Only run apt updates and tool installs if packages are missing
-if ! command -v cmake >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1; then
+if ! command -v cmake >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1 || ! dpkg -s libportaudio2 &>/dev/null || ! command -v aplay >/dev/null 2>&1; then
     sudo apt update
     sudo apt install -y \
         build-essential \
@@ -150,9 +150,11 @@ if ! command -v cmake >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1; the
         git \
         python3-dev \
         python3-pip \
-        python3-setuptools
+        python3-setuptools \
+        libportaudio2 \
+        alsa-utils
 else
-    echo "Build tools already present. Skipping apt install."
+    echo "Build tools and audio libraries already present. Skipping apt install."
 fi
 
 echo
@@ -268,7 +270,7 @@ export UV_NO_INSTALL_PACKAGE="llama-cpp-python"
 
 uv() {
     if [[ "\$PWD" == "\$TUFFY_HOME"* && "\$1" == "sync" ]]; then
-        command uv sync --no-install-package llama-cpp-python "\${@:2}"
+        command uv sync --no-install-package llama-cpp-python --extra voice "\${@:2}"
     else
         command uv "\$@"
     fi

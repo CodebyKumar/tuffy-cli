@@ -35,6 +35,12 @@ connect_mcp_servers(extra_configs=mcp_configs_from_skills())
 
 def main():
     print_logo()
+    
+    import sys
+    voice_mode = False
+    if "--voice" in sys.argv:
+        voice_mode = True
+
     # User's persisted choice (set via '/models default <id>') wins over the
     # hardcoded DEFAULT_MODEL; falls back to DEFAULT_MODEL on first run.
     # Works uniformly whether the chosen model is local or API - model cards
@@ -59,6 +65,12 @@ def main():
     model_card = model_registry.get(session.current_model_id)
     static_tokens = len(build_system_prompt(model_card=model_card)) // 4
     memory.reconfigure_for_model(model_card, static_prompt_tokens=static_tokens)
+    
+    if voice_mode:
+        from src.voice import start_voice_session
+        start_voice_session(session)
+        return
+
     model_name = model_card["name"]
     print_session_info(model_name, session.agent.supports_vision)
 
@@ -76,6 +88,25 @@ def main():
             continue
 
         if stripped.startswith("/"):
+            cmd_lower = stripped.lower()
+            if cmd_lower == "/mode" or cmd_lower.startswith("/mode "):
+                mode = cmd_lower[len("/mode"):].strip()
+                if not mode:
+                    print(f"{C_DIM}Current mode: text. Use '/mode voice' to switch.{C_RESET}\n")
+                    continue
+                if mode == "voice":
+                    from src.voice import start_voice_session
+                    res = start_voice_session(session)
+                    if res == "exit":
+                        break
+                    continue
+                elif mode == "text":
+                    print(f"{C_DIM}Already in text mode.{C_RESET}\n")
+                    continue
+                else:
+                    print(f"{C_DIM}Unknown mode: {mode}. Use '/mode voice' or '/mode text'.{C_RESET}\n")
+                    continue
+
             result = handle_command(session, stripped)
             if result == "exit":
                 session.end()

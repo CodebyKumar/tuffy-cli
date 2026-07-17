@@ -30,6 +30,7 @@ MCP servers, skills, tools). Most folders below have their own README with more 
   instead of one flat list; `/status` shows the active model and session state at a glance.
 - **Clean chat with live traces**: colored step-by-step traces show thoughts, tool calls, and
   responses as they happen, with an animated status spinner while the agent works.
+- **Voice Interactive Mode**: Run the CLI in full voice mode using local Whisper STT (Speech-to-Text) and Piper TTS (Text-to-Speech) for hands-free spoken conversations.
 - **Elastimem-backed memory**: a SQLite-backed store with facts, episodic recall, session
   summaries, and lessons learned, extracted by a background worker gated to stay off the
   foreground reply path. See [data/README.md](data/README.md).
@@ -63,6 +64,7 @@ Run `/help` inside Tuffy for the full categorized list, or see
 - `/models info <id>` - Show a model's full model card, including provider/API details.
 
 **Session**
+- `/mode [text|voice]` - View or switch interaction mode (text vs voice).
 - `/help` - Show the full command list.
 - `/exit` or `/quit` - Save session memory and close the program.
 
@@ -79,6 +81,9 @@ Set up your virtual environment and install the dependencies:
 ```bash
 # Using uv (recommended)
 uv sync
+
+# Or to include optional voice interactive mode packages
+uv sync --extra voice
 
 # Or using standard pip
 pip install -r pyproject.toml
@@ -111,6 +116,11 @@ markdown body of guidance). Optionally add a `tools.py` or an `mcp.json`. See
 Run the main script to start your chat session:
 ```bash
 python3 main.py
+```
+
+To start directly in Voice Mode, pass the `--voice` flag:
+```bash
+python3 main.py --voice
 ```
 
 ### 7. (Optional) Running Tuffy from anywhere with a `tuffy` command
@@ -151,7 +161,8 @@ src/
   identity.py           Fixed self-model (name, capabilities) — never LLM-written
   memory.py             Elastimem-backed long-term memory (facts/episodic/lessons) + the `remember`/`recall` tools
   settings.py           Persisted user settings (.tuffy/settings.json) — default model id
-  vision.py              Image encoding + IMAGE_SENTINEL protocol for vision tool results
+  vision.py           Image encoding + IMAGE_SENTINEL protocol for vision tool results
+  voice/              Local Speech-to-Text (Whisper) and Text-to-Speech (Piper) wrappers + interactive audio loop
   llm/                   Model-provider interface + adapters (local weights, OpenAI-compatible API)
   models/                Model registry; configs/local.py + configs/api.py hold model cards; weights/ holds gitignored model weight files
   prompts/               All system-prompt text: personas.yaml + templates.py
