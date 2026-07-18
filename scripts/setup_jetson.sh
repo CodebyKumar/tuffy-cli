@@ -72,16 +72,27 @@ echo "CUDA detected at $CUDA_HOME:"
 "$CUDA_HOME/bin/nvcc" --version
 echo
 
-# llama-cpp-python must NEVER be touched by plain `uv sync` — the default
-# PyPI wheel is CPU-only and would silently clobber the CUDA source build
-# we install below, forcing a full rebuild on every subsequent run. Both
-# the explicit flag (this script's own `uv sync` calls) and the env var
-# (uv reads UV_NO_INSTALL_PACKAGE itself, so it also protects any bare
-# `uv sync` run directly in this same process/subshell) are set — belt
-# and suspenders, since the RC-file guard below only applies to *future*
+# --- Pin every uv invocation to the project venv's interpreter ---------
+# `uv pip install/uninstall` does NOT reliably infer the target
+# interpreter from an activated venv when a newer system Python (e.g.
+# 3.11+) is also present - it can resolve wheel tags (cp311) against
+# that system interpreter instead of the venv's cp310, which is exactly
+# why onnxruntime-gpu (cp310-only wheels on Jetson) failed to resolve.
+# Passing --python explicitly removes the ambiguity everywhere.
+VENV_PYTHON="$PROJECT_ROOT/.venv/bin/python"
+
+# llama-cpp-python, pywhispercpp, onnxruntime, and piper-tts must NEVER be
+# touched by plain `uv sync` — the default PyPI wheels are CPU-only (or,
+# for piper-tts, would drag in a CPU-only onnxruntime dependency) and
+# would silently clobber the CUDA-enabled builds we install below,
+# forcing a full rebuild on every subsequent run. Both the explicit flag
+# (this script's own `uv sync` calls) and the env var (uv reads
+# UV_NO_INSTALL_PACKAGE itself, so it also protects any bare `uv sync`
+# run directly in this same process/subshell) are set — belt and
+# suspenders, since the RC-file guard below only applies to *future*
 # shells, not this one.
-SYNC_FLAGS=(--no-install-package llama-cpp-python --no-install-package pywhispercpp --no-install-package onnxruntime --inexact --extra voice)
-export UV_NO_INSTALL_PACKAGE="llama-cpp-python,pywhispercpp,onnxruntime"
+SYNC_FLAGS=(--no-install-package llama-cpp-python --no-install-package pywhispercpp --no-install-package onnxruntime --no-install-package piper-tts --inexact --extra voice)
+export UV_NO_INSTALL_PACKAGE="llama-cpp-python,pywhispercpp,onnxruntime,piper-tts"
 
 verify_cuda() {
     .venv/bin/python - <<'PY'
@@ -142,6 +153,23 @@ except Exception as e:
 PY
 }
 
+verify_piper_tts() {
+    .venv/bin/python - <<'PY'
+import sys
+try:
+    from piper import PiperVoice  # noqa: F401
+    print("piper-tts import verification succeeded")
+except Exception as e:
+    print(f"piper-tts verification failed: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
+    # piper-tts also ships a CLI entry point; confirm it's on PATH inside the venv.
+    if ! .venv/bin/python -m piper --help >/dev/null 2>&1; then
+        echo "piper CLI module check failed" >&2
+        return 1
+    fi
+}
+
 # Fingerprint of only what should invalidate the cached CUDA build: the
 # llama-cpp-python version constraint (a bump there means a real rebuild) and
 # this script itself (CMAKE flags, architecture, etc). Deliberately NOT the
@@ -158,13 +186,17 @@ current_fingerprint() {
 if [[ -d .venv && -f "$MARKER_FILE" ]]; then
     echo "Existing CUDA-enabled Tuffy environment detected."
 
-    if [[ "$(cat "$MARKER_FILE")" == "$(current_fingerprint)" ]] && verify_cuda >/dev/null 2>&1; then
+    if [[ "$(cat "$MARKER_FILE")" == "$(current_fingerprint)" ]] \
+        && verify_cuda >/dev/null 2>&1 \
+        && verify_whisper_cuda >/dev/null 2>&1 \
+        && verify_onnx_gpu >/dev/null 2>&1 \
+        && verify_piper_tts >/dev/null 2>&1; then
         echo "CUDA backend verified, dependencies unchanged."
 
         if [[ -f uv.lock ]]; then
-            uv sync --frozen "${SYNC_FLAGS[@]}"
+            uv sync --frozen --python "$VENV_PYTHON" "${SYNC_FLAGS[@]}"
         else
-            uv sync "${SYNC_FLAGS[@]}"
+            uv sync --python "$VENV_PYTHON" "${SYNC_FLAGS[@]}"
         fi
 
         echo
@@ -196,7 +228,8 @@ if ! command -v cmake >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1 || !
         python3-pip \
         python3-setuptools \
         libportaudio2 \
-        alsa-utils
+        alsa-utils \
+        espeak-ng
 else
     echo "Build tools and audio libraries already present. Skipping apt install."
 fi
@@ -225,9 +258,9 @@ echo " Synchronizing project dependencies"
 echo "======================================"
 
 if [[ -f uv.lock ]]; then
-    uv sync --frozen "${SYNC_FLAGS[@]}"
+    uv sync --frozen --python "$VENV_PYTHON" "${SYNC_FLAGS[@]}"
 else
-    uv sync "${SYNC_FLAGS[@]}"
+    uv sync --python "$VENV_PYTHON" "${SYNC_FLAGS[@]}"
 fi
 
 echo
@@ -253,9 +286,10 @@ if [[ "$NEED_REBUILD" == "true" ]]; then
     export CMAKE_ARGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=87"
     export FORCE_CMAKE=1
 
-    uv pip uninstall -y llama-cpp-python || true
+    uv pip uninstall --python "$VENV_PYTHON" -y llama-cpp-python || true
 
     uv pip install \
+        --python "$VENV_PYTHON" \
         --force-reinstall \
         --no-cache-dir \
         --no-binary llama-cpp-python \
@@ -288,9 +322,10 @@ if [[ "$NEED_WHISPER_REBUILD" == "true" ]]; then
     export GGML_CUDA=1
     export WHISPER_CUDA=1
 
-    uv pip uninstall -y pywhispercpp || true
+    uv pip uninstall --python "$VENV_PYTHON" -y pywhispercpp || true
 
     uv pip install \
+        --python "$VENV_PYTHON" \
         --force-reinstall \
         --no-cache-dir \
         --no-binary pywhispercpp \
@@ -324,7 +359,9 @@ fi
 JETSON_PIP_INDEX="https://pypi.jetson-ai-lab.io/$JP_VERSION/$CUDA_SUFFIX"
 
 NEED_ONNX_GPU=true
-if ! verify_onnx_gpu; then
+if ! .venv/bin/python -c "import onnxruntime" 2>&1; then
+    echo "onnxruntime is not installed or cannot be imported."
+elif ! verify_onnx_gpu; then
     echo "onnxruntime-gpu check failed. Re-installing..."
 else
     NEED_ONNX_GPU=false
@@ -333,15 +370,59 @@ fi
 if [[ "$NEED_ONNX_GPU" == "true" ]]; then
     echo "Installing GPU-enabled onnxruntime for Jetson from $JETSON_PIP_INDEX..."
     echo
-    
-    uv pip uninstall -y onnxruntime || true
-    
+
+    uv pip uninstall --python "$VENV_PYTHON" -y onnxruntime onnxruntime-gpu || true
+
     uv pip install \
+        --python "$VENV_PYTHON" \
         --extra-index-url "$JETSON_PIP_INDEX" \
         --no-cache-dir \
         "onnxruntime-gpu"
 else
     echo "onnxruntime-gpu is already installed and verified with CUDA support."
+fi
+
+echo
+echo "======================================"
+echo " Validating piper-tts"
+echo "======================================"
+
+# piper-tts is the Python front-end for the Piper TTS engine. It runs its
+# voice models through onnxruntime, so on Jetson we want it to ride on top
+# of the CUDA-enabled onnxruntime-gpu we just verified above rather than
+# pulling in the CPU-only "onnxruntime" package as a transitive dependency.
+NEED_PIPER=true
+if ! .venv/bin/python -c "import piper" 2>&1; then
+    echo "piper-tts is not installed or cannot be imported."
+elif ! verify_piper_tts; then
+    echo "piper-tts is installed, but failed verification."
+else
+    NEED_PIPER=false
+fi
+
+if [[ "$NEED_PIPER" == "true" ]]; then
+    echo "Installing piper-tts (without pulling in a competing CPU-only onnxruntime)..."
+    echo
+
+    uv pip uninstall --python "$VENV_PYTHON" -y piper-tts || true
+
+    # piper-tts's only real runtime deps are "onnxruntime" and "pathvalidate"
+    # (confirmed from its PyPI metadata). --no-deps skips the plain
+    # "onnxruntime" pin so it doesn't clobber the CUDA-enabled
+    # onnxruntime-gpu build verified above; numpy is already pulled in via
+    # the [voice] extra, so pathvalidate is the only thing left to add.
+    uv pip install \
+        --python "$VENV_PYTHON" \
+        --no-cache-dir \
+        --no-deps \
+        "piper-tts>=1.4.2"
+
+    uv pip install \
+        --python "$VENV_PYTHON" \
+        --no-cache-dir \
+        "pathvalidate>=3,<4"
+else
+    echo "piper-tts is already installed and verified."
 fi
 
 echo
@@ -352,6 +433,7 @@ echo "======================================"
 verify_cuda
 verify_whisper_cuda
 verify_onnx_gpu
+verify_piper_tts
 
 current_fingerprint > "$MARKER_FILE"
 
@@ -397,18 +479,18 @@ tuffy() {
     python main.py
 }
 
-# "uv sync" must never reinstall llama-cpp-python's PyPI wheel over the
-# CUDA source build. UV_NO_INSTALL_PACKAGE is uv's own env var for this
-# (see "uv sync --help") — set globally rather than scoped to \$TUFFY_HOME
-# so it also covers a bare "uv sync" run from a script, cron job, or any
-# non-interactive shell that sourced this rc file without going through
-# the uv() function below. Harmless for any other project, since it only
-# ever affects a package actually named llama-cpp-python.
-export UV_NO_INSTALL_PACKAGE="llama-cpp-python,pywhispercpp,onnxruntime"
+# "uv sync" must never reinstall llama-cpp-python/pywhispercpp/onnxruntime/
+# piper-tts PyPI wheels over the CUDA-aware builds. UV_NO_INSTALL_PACKAGE is
+# uv's own env var for this (see "uv sync --help") — set globally rather
+# than scoped to \$TUFFY_HOME so it also covers a bare "uv sync" run from a
+# script, cron job, or any non-interactive shell that sourced this rc file
+# without going through the uv() function below. Harmless for any other
+# project, since it only ever affects packages actually named that.
+export UV_NO_INSTALL_PACKAGE="llama-cpp-python,pywhispercpp,onnxruntime,piper-tts"
 
 uv() {
     if [[ "\$PWD" == "\$TUFFY_HOME"* && "\$1" == "sync" ]]; then
-        command uv sync --no-install-package llama-cpp-python --no-install-package pywhispercpp --no-install-package onnxruntime --inexact --extra voice "\${@:2}"
+        command uv sync --python "\$TUFFY_HOME/.venv/bin/python" --no-install-package llama-cpp-python --no-install-package pywhispercpp --no-install-package onnxruntime --no-install-package piper-tts --inexact --extra voice "\${@:2}"
     else
         command uv "\$@"
     fi
