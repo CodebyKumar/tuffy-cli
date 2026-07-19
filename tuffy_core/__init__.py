@@ -23,6 +23,8 @@ __all__ = [
     "memory_search",
     "list_skills",
     "list_models",
+    "WhisperSTT",
+    "PiperTTS",
 ]
 
 
@@ -237,3 +239,30 @@ def list_models() -> list[dict]:
     from src.models.registry import registry as model_registry
 
     return [model_registry.get(mid) for mid in model_registry.list_ids()]
+
+
+class WhisperSTT:
+    """Wrapper for Whisper Speech-to-Text, loaded lazily to avoid import errors
+    if voice dependencies are not installed."""
+
+    def __init__(self, model_name: str = "small.en"):
+        from src.voice.stt import WhisperSTT as _WhisperSTT
+        self._impl = _WhisperSTT(model_name)
+
+    def transcribe(self, pcm) -> str:
+        return self._impl.transcribe(pcm)
+
+
+class PiperTTS:
+    """Wrapper for Piper Text-to-Speech, loaded lazily to avoid import errors
+    if voice dependencies are not installed."""
+
+    def __init__(self, voice_id: str = "en_US-lessac-medium"):
+        from src.voice.tts import PiperTTS as _PiperTTS
+        self._impl = _PiperTTS(voice_id)
+        self.sample_rate = self._impl.sample_rate
+        self.sample_width = self._impl.sample_width
+        self.channels = self._impl.channels
+
+    def synthesize(self, text: str):
+        return self._impl.synthesize(text)
