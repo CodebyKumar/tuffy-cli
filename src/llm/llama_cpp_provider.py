@@ -99,13 +99,18 @@ class LlamaCppProvider(LLMProvider):
     def unload(self) -> None:
         """Frees the llama.cpp context and any vision (mtmd) context so their
         backing memory (weights, KV cache, clip buffers) is released before
-        another model is loaded in its place."""
+        another model is loaded in its place. self.llm is always cleared,
+        even if native close() raises, so a bad close can't leave a stale
+        handle behind or crash the caller (switch_model has already loaded
+        the replacement agent by the time this runs)."""
         if self.llm is not None:
-            handler = self.llm.chat_handler
-            if handler is not None and hasattr(handler, "close"):
-                handler.close()
-            self.llm.close()
-        self.llm = None
+            try:
+                handler = self.llm.chat_handler
+                if handler is not None and hasattr(handler, "close"):
+                    handler.close()
+                self.llm.close()
+            finally:
+                self.llm = None
 
     @property
     def supports_vision(self) -> bool:

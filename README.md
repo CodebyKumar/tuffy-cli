@@ -149,6 +149,25 @@ bash scripts/setup_jetson.sh
 ```
 Re-run it any time after pulling new dependencies or model weights — it's idempotent.
 
+**Voice mode fails to start / errors when switching to it on Jetson?** The two most common
+causes:
+- `setup_jetson.sh` was never run (or its CUDA build step failed) — plain `uv sync --extra voice`
+  installs CPU-only `pywhispercpp`/`onnxruntime`/`piper-tts` wheels, which still work but are much
+  slower, and can fail to import at all if a previous partial install left a broken native
+  extension. Re-run `bash scripts/setup_jetson.sh` and read its "Final validation" section — it
+  prints exactly which of `llama-cpp-python` / `pywhispercpp` / `onnxruntime` / `piper-tts` is
+  missing CUDA support.
+- If Tuffy was copied to the Jetson via pendrive rather than freshly set up, `src/voice/weights/`
+  (the cached Whisper `.bin` and Piper `.onnx`/`.onnx.json` files) is gitignored and must be
+  copied along with the rest of the repo — otherwise first use of voice mode tries to download
+  them from the network, which fails outright on an offline/air-gapped Jetson.
+
+Either way, `/mode voice` (or `--voice`) prints the actual exception ("Error initializing voice
+components: ...") and falls back to text mode instead of crashing — that message is the fastest
+way to tell which of the two causes above applies. Once voice mode is running, a mic/ALSA failure
+mid-session (e.g. a USB microphone unplugged) is also caught and reported per-turn rather than
+ending the session.
+
 ---
 
 ## Project Structure

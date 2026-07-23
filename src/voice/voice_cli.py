@@ -116,10 +116,16 @@ def start_voice_session(session: Session) -> None:
 
             # 2. Empty Enter: Run voice mode (mic record -> transcribe -> turn -> play audio)
             print(f"{C_DIM}Recording... Press [Enter] to stop.{C_RESET}", end="", flush=True)
-            
-            # Capture audio from the microphone
-            audio_data = audio.record_audio()
-            
+
+            # Capture audio from the microphone. A mic/ALSA failure here (unplugged
+            # device, missing arecord, PortAudio device busy) must not crash the
+            # whole assistant process - drop back to the voice prompt instead.
+            try:
+                audio_data = audio.record_audio()
+            except Exception as e:
+                print(f"\r{C_WARN}Recording failed: {e}                               {C_RESET}\n")
+                continue
+
             # Backspace the "Recording..." prompt line to clean up the screen
             print(f"\r{C_DIM}Transcribing...                         {C_RESET}", end="", flush=True)
             
