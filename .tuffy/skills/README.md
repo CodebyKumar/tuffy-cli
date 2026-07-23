@@ -33,5 +33,5 @@ folder is scanned by.
 
 ## Example
 
-[code-review/SKILL.md](code-review/SKILL.md) is a working example: guidance-only, no `tools.py`
-or `mcp.json`, showing the minimal shape a skill can take.
+[scratchpad/SKILL.md](scratchpad/SKILL.md) is a working example that also ships a `tools.py`
+(`scratch_note`/`scratch_list`/`scratch_clear`), showing how a skill can extend the tool surface.

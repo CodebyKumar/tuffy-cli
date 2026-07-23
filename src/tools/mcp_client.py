@@ -23,8 +23,22 @@ from mcp.client.stdio import stdio_client
 
 from src.tools.registry import registry
 
-MCP_CONFIG_PATH = "./.tuffy/mcp.json"
+# Resolved against this package's own location, not the caller's cwd — the
+# terminal always runs with cwd == this repo's root so a relative path was
+# invisible historically, but any other consumer importing tuffy as a
+# package (e.g. tuffy-ui/backend, started from a different cwd) needs this
+# to still find the same .tuffy/mcp.json. Same fix as src/memory.py's
+# DB_DIR and src/models/registry.py's weight paths.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+MCP_CONFIG_PATH = os.path.join(_REPO_ROOT, ".tuffy", "mcp.json")
 _CALL_TIMEOUT_SECONDS = 30
+
+# Every connected MCP server's own stderr (startup banners, warnings, its
+# internal logging — none of it is Tuffy's own output) goes here instead of
+# the terminal. stdout is never touched: it's the JSON-RPC wire the SDK
+# itself reads, redirecting it would break the protocol.
+_LOG_DIR = os.path.join(_REPO_ROOT, "logs")
+MCP_SERVER_LOG_PATH = os.path.join(_LOG_DIR, "mcp_servers.log")
 
 _connected_servers = []  # names of servers successfully connected, for /tools-adjacent diagnostics
 
@@ -92,6 +106,19 @@ class _MCPBridge:
         self._thread = None
         self._sessions = {}  # server name -> ClientSession
         self._stack_cms = []  # keeps stdio_client/session async context managers alive
+        self._errlog = None  # lazily-opened shared file handle for every server's stderr
+
+    def _get_errlog(self):
+        """Opens logs/mcp_servers.log once and reuses the same handle for
+        every connected server's stderr for the rest of the process's
+        lifetime — an MCP server's own startup banners/warnings/internal
+        logging are not Tuffy's output and shouldn't clutter its terminal,
+        but they're still worth keeping on disk for debugging a server that
+        won't connect."""
+        if self._errlog is None:
+            os.makedirs(_LOG_DIR, exist_ok=True)
+            self._errlog = open(MCP_SERVER_LOG_PATH, "a", encoding="utf-8")
+        return self._errlog
 
     def start(self):
         ready = threading.Event()
@@ -117,7 +144,10 @@ class _MCPBridge:
             args=config.get("args", []),
             env={**os.environ, **config.get("env", {})} if config.get("env") else None,
         )
-        stdio_cm = stdio_client(params)
+        errlog = self._get_errlog()
+        errlog.write(f"\n--- {name} (starting) ---\n")
+        errlog.flush()
+        stdio_cm = stdio_client(params, errlog=errlog)
         read_stream, write_stream = await stdio_cm.__aenter__()
         session_cm = ClientSession(read_stream, write_stream)
         session = await session_cm.__aenter__()

@@ -21,12 +21,12 @@ calls encode_image_to_data_uri the same way.
 """
 
 import base64
+import io
 import mimetypes
 import os
 from datetime import datetime
 
-import cv2
-import numpy as np
+from PIL import Image
 
 from src.tools.registry import registry
 from src.tools.editing import WORKSPACE_DIR, safe_workspace_path
@@ -54,22 +54,29 @@ def encode_image_to_data_uri(path: str) -> str:
 
     # Read the bytes first: raises a clean PermissionError/OSError for
     # unreadable files (e.g. macOS privacy-protected folders) instead of
-    # letting cv2.imread print a warning and silently return None.
+    # letting Image.open print a warning and silently fail.
     with open(path, "rb") as f:
         raw = f.read()
 
-    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
-    if img is not None:
-        h, w = img.shape[:2]
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img.load()
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        w, h = img.size
         scale = _MAX_IMAGE_DIM / max(h, w)
         if scale < 1.0:
-            img = cv2.resize(img, (max(1, round(w * scale)), max(1, round(h * scale))), interpolation=cv2.INTER_AREA)
-        ok, jpeg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, _JPEG_QUALITY])
-        if ok:
-            encoded = base64.b64encode(jpeg.tobytes()).decode("ascii")
-            return f"data:image/jpeg;base64,{encoded}"
+            img = img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
 
-    # Fall back to the raw bytes for formats cv2 can't decode.
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=_JPEG_QUALITY)
+        encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{encoded}"
+    except Exception:
+        pass
+
+    # Fall back to the raw bytes for formats Pillow can't decode.
     mime_type, _ = mimetypes.guess_type(path)
     mime_type = mime_type or "image/jpeg"
     encoded = base64.b64encode(raw).decode("ascii")
@@ -84,6 +91,11 @@ def encode_image_to_data_uri(path: str) -> str:
     group="system",
 )
 def capture_image(placeholder: str = "") -> str:
+    # Imported lazily: cv2 is only needed for this one tool (webcam access),
+    # so a session that never calls capture_image never pays its import
+    # cost or requires it installed at all.
+    import cv2
+
     try:
         cam = cv2.VideoCapture(_CAMERA_INDEX)
         if not cam.isOpened():

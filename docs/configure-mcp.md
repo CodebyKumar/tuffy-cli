@@ -73,6 +73,13 @@ the value is:
 | `env` | no | Extra environment variables merged into the subprocess's environment (for API tokens, etc). |
 | `type` | no | Accepted and ignored if present (some configs include `"type": "stdio"`) — stdio is the only transport this client supports. |
 
+`args` values are passed straight through to `command` with no path resolution by Tuffy itself —
+a relative path (e.g. `"agent_workspace"` for `server-filesystem`) is resolved by the launched
+process against whatever directory Tuffy itself was started from, which is always this repo's
+root for both entry points (`main.py` and `tuffy-ui`'s backend). Never hardcode an absolute path
+containing your own home directory or username here — it won't work on anyone else's machine (or
+your own, after a home directory rename); use a path relative to this repo's root instead.
+
 Two older shapes are also still accepted, for configs already written against them or written by
 `/mcp add`: a bare list, or `{"servers": [...]}`, of `{name, command, args?, env?}` dicts (`name`
 as a field inside each entry rather than the object key). See
@@ -84,7 +91,14 @@ resolution logic — a malformed entry is skipped with a printed warning, never 
 Tuffy connects to every configured server at startup, before the first system prompt is built.
 A server that fails to connect (bad command, missing binary, crashed on init) is skipped with a
 `[mcp] Failed to connect to server '<name>': ...` warning — it never blocks startup or takes
-down the rest of the session.
+down the rest of the session. A server that connects successfully prints one line to Tuffy's own
+terminal (`[mcp] Connected to '<name>' (N tool(s)).`) as part of the normal startup summary.
+
+The server's *own* stderr output (startup banners, its own internal logging/warnings — not
+Tuffy's) is not shown in the terminal at all; it's redirected to `logs/mcp_servers.log`
+(gitignored) instead, since it isn't Tuffy's own output and would otherwise clutter every
+startup. Check that file if a server connects but seems to be misbehaving and you need its own
+logs to debug why.
 
 ## 3. Verify it worked
 

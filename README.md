@@ -110,7 +110,7 @@ blocks startup.
 See [docs/configure-skills.md](docs/configure-skills.md) — drop a folder into
 `./.tuffy/skills/<name>/` with a `SKILL.md` (YAML frontmatter with `name`/`description`, plus a
 markdown body of guidance). Optionally add a `tools.py` or an `mcp.json`. See
-`.tuffy/skills/code-review/` for a working example.
+`.tuffy/skills/scratchpad/` for a working example.
 
 ### 6. Running the Agent
 Run the main script to start your chat session:
@@ -137,6 +137,16 @@ tuffy() {
 Then `source ~/.zshrc` (or open a new terminal tab) once. It runs in a subshell, so your working
 directory is untouched after Tuffy exits, and it prefers the project's own `.venv` python if one
 exists.
+
+Note this function calls the venv's python by its direct path (`.venv/bin/python3`) rather than
+activating the venv in your shell first — nothing needs deactivating afterward, since your
+shell's own environment was never touched. **If you instead run Tuffy by hand with
+`source .venv/bin/activate` followed by `python3 main.py`, you must run `deactivate` yourself
+once Tuffy exits** — a subprocess (Tuffy, or anything else) can never deactivate a venv that was
+activated in its *parent* shell; environment changes only ever flow parent → child, never child →
+parent, so there is no way for `main.py` to undo `source .venv/bin/activate` for you. Prefer the
+`tuffy()` function above if you want a single command that never leaves your shell in an altered
+state.
 
 ### 8. (Jetson Orin) One-shot setup
 If you're deploying Tuffy on a Jetson Orin (e.g. copied over via a pendrive rather than

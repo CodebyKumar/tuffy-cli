@@ -66,5 +66,5 @@ that should trigger the skill and confirm the model calls `read_skill` before ac
 
 ## Example
 
-[.tuffy/skills/code-review/](../.tuffy/skills/code-review/) is a minimal working example:
-guidance-only, no `tools.py` or `mcp.json`.
+[.tuffy/skills/scratchpad/](../.tuffy/skills/scratchpad/) is a working example that ships its
+own `tools.py` (`scratch_note`/`scratch_list`/`scratch_clear`) alongside `SKILL.md`.

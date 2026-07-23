@@ -24,7 +24,14 @@ import os
 
 import yaml
 
-SKILLS_DIR = "./.tuffy/skills"
+# Resolved against this package's own location, not the caller's cwd — the
+# terminal always runs with cwd == this repo's root so a relative path was
+# invisible historically, but any other consumer importing tuffy as a
+# package (e.g. tuffy-ui/backend, started from a different cwd) needs this
+# to still find the same .tuffy/skills/. Same fix as src/memory.py's
+# DB_DIR and src/tools/mcp_client.py's MCP_CONFIG_PATH.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SKILLS_DIR = os.path.join(_REPO_ROOT, ".tuffy", "skills")
 
 _loaded_skills = {}  # name -> {"description": str, "body": str, "path": str}
 

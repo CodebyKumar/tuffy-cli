@@ -24,11 +24,17 @@ Rather than introducing new dependencies, `tuffy_core` acts as a thin wrapper ar
 ### 2. Inspecting Registries & Capabilities
 * **`list_tools()`**: Returns a list of all registered tools (native, MCP, or skill-based).
 * **`list_skills()`**: Returns a list of all installed skill capability packs.
+* **`skill_detail(name: str)`**: One skill's full detail, including whether it ships its own `tools.py`/`mcp.json`. Raises `ValueError` if `name` isn't installed.
 * **`list_models()`**: Returns all registered local and API model cards.
+* **`model_info(model_id: str)`**: One model's full card (license, source, description, rate limits). Raises `ValueError` if `model_id` isn't registered.
 
 ### 3. Long-Term Memory
 * **`memory_summary()`**: Returns database stats (number of facts, sessions, lessons, path, and size).
 * **`memory_search(query: str)`**: Conducts a semantic recall query against the SQLite/Elastimem memory store.
+* **`memory_facts()`**: Returns the current facts about the user as a `{key: value}` dict.
+* **`memory_fact_history(key: str)`**: Version history for one fact key (value, valid-from timestamp, active/invalidated/archived status).
+* **`memory_forget(key: str)`**: Tombstones a fact key (non-destructive). Returns whether a fact with that key was found.
+* **`memory_quarantine(n: int = 20)`**: Recently rejected/quarantined automatic fact extractions.
 
 ### 4. Voice Services
 * **`WhisperSTT`**: Speech-to-Text transcriber wrapper using local Whisper weights.

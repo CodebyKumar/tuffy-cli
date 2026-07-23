@@ -1,5 +1,13 @@
 # Tuffy UI — Implementation Plan (for review, not yet approved for coding)
 
+> **This is a point-in-time design proposal, not a current-state reference.** Implementation has
+> since progressed well past this plan, and some specifics below (the REST API's exact endpoint
+> list, the frontend's file layout, the orb's rendering approach) have changed since this was
+> written and are now out of date — see the inline notes marking those sections, and prefer
+> reading the actual current code (`tuffy-ui/backend/server/app.py` for the real API surface,
+> `tuffy-ui/frontend/src/` for the real layout) over this document for anything that matters for
+> correctness. Kept for the architectural reasoning/decisions that are still accurate.
+
 Status: **proposal.** Per the architecture-definition instructions, this document analyzes the
 existing Tuffy codebase, answers all open architectural questions, and produces the requested
 deliverables. No code changes have been made. This supersedes both the earlier
@@ -204,14 +212,21 @@ workspace/
     │
     ├── frontend/                        webview frontend (vanilla JS/TS, no React/Next/Electron)
     │   ├── index.html
-    │   ├── orb.ts                       Canvas-based orb renderer + state machine
-    │   ├── conversation.ts              message list rendering
-    │   ├── input.ts                     text input + mic capture (MediaRecorder)
-    │   ├── ws-client.ts                 WebSocket client, event → UI state mapping
+    │   ├── src/                         STALE below — see actual current layout note after this tree
+    │   │   ├── main.ts
+    │   │   ├── state/                   orb.ts (Three.js shader-blob renderer + state machine), ws-client.ts
+    │   │   ├── components/              conversation.ts, settings-sheet.ts, input.ts, device-picker.ts, dropdown.ts, image-attach.ts, slash-palette.ts
+    │   │   ├── audio/                   mic.ts, mic-worklet.ts, tts-player.ts
+    │   │   └── lib/                     api.ts, icons.ts
     │   └── styles.css
     ├── package.json                    minimal — bundler only (Vite for TS, no framework)
     └── README.md
 ```
+
+> The `frontend/` subtree above is stale: it shows an early flat `frontend/*.ts` layout. The
+> actual current layout groups files under `frontend/src/{state,components,audio,lib}/` as
+> annotated inline above — see `tuffy-ui/frontend/src/` directly for the real, current file list.
+> The orb is also no longer a plain Canvas renderer — see the note in §6 below.
 
 `tuffy-ui/backend/` depends on `tuffy` only through `from tuffy import ...` (§0) — never reaches
 into `tuffy/src/...` internals, enforced by the package boundary itself. `tuffy` has zero
@@ -317,6 +332,12 @@ Explicit answers, since "session" is used loosely elsewhere in this document:
 ## 4. API Design
 
 ### REST endpoints
+
+> **Stale — this table reflects an early implementation pass.** See
+> `tuffy-ui/backend/server/app.py` for the real, current endpoint list, which has grown to also
+> cover tools, memory (including per-fact history/forget/quarantine), skills (including per-skill
+> detail), MCP servers, per-model info, session status, running slash commands, and shutdown —
+> significantly more surface than the four endpoints originally planned here.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -519,6 +540,13 @@ not a new engine event; it's derived client-side from seeing a `tool_call` witho
 WebSocket message sequence rather than any `tuffy` engine event.
 
 ### Animation system
+
+> **Stale — the actual implementation uses Three.js, not plain Canvas 2D.** The orb renders as a
+> full-screen WebGL shader (a soft-edged, perfectly circular disc with interior motion driven by
+> layered noise — no faceted 3D geometry, no per-angle silhouette warp), with a 2D Canvas
+> fallback only for environments without WebGL. See `tuffy-ui/frontend/src/state/orb.ts` for the
+> real current implementation; the plan below (as originally written) is kept for the state-model
+> reasoning, which is still accurate.
 
 Canvas 2D (not WebGL/Three.js, per the "avoid heavy frameworks" instruction) — a single
 `<canvas>` element with a `requestAnimationFrame` loop reading current orb state + (for

@@ -23,6 +23,10 @@ data/
 # Agent workspace (temporary execution artifacts)
 agent_workspace/
 
+# Connected MCP servers' own stderr output (startup banners, warnings) —
+# see src/tools/mcp_client.py's MCP_SERVER_LOG_PATH
+logs/
+
 # OS-specific files
 .DS_Store
 
@@ -41,6 +45,9 @@ agent_workspace/
 
 # Local user settings (e.g. chosen default model), machine-specific
 .tuffy/settings.json
+
+# Scratchpad skill's generated note data, machine-specific
+.tuffy/skills/scratchpad/notes.json
 
 # API keys / secrets, read directly by src/llm/openai_compatible_provider.py
 .env

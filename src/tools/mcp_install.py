@@ -19,7 +19,8 @@ import re
 
 import requests
 
-MCP_CONFIG_PATH = "./.tuffy/mcp.json"
+from src.tools.mcp_client import MCP_CONFIG_PATH
+
 _FETCH_TIMEOUT = 10
 
 _GITHUB_URL_RE = re.compile(

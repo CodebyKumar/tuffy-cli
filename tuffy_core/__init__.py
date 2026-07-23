@@ -14,6 +14,32 @@ from typing import Iterator, Optional
 
 from src.engine.events import TurnEvent
 
+import src.tools  # noqa: F401 - registers tools (editing/coding/research/system) as a side effect of import
+import src.memory as _memory_module  # noqa: F401 - registers the 'remember' tool
+import src.skills  # noqa: F401 - registers the read_skill tool
+
+_discovery_done = False
+
+
+def _ensure_skills_and_mcp_discovered() -> None:
+    """Runs skill discovery and MCP server connection exactly once per
+    process. main.py (the terminal entry point) does this at module import
+    time before its first system prompt is built; any other consumer that
+    imports tuffy_core directly (e.g. tuffy-ui/backend) never executes
+    main.py, so without this, skills and MCP servers configured in
+    ./.tuffy/ would silently never load for that consumer — same tools
+    registry, same config files, just never triggered. Called from
+    create_session() so it always runs before the first session exists."""
+    global _discovery_done
+    if _discovery_done:
+        return
+    from src.skills.loader import discover_skills, mcp_configs_from_skills
+    from src.tools.mcp_client import connect_mcp_servers
+
+    discover_skills()
+    connect_mcp_servers(extra_configs=mcp_configs_from_skills())
+    _discovery_done = True
+
 __all__ = [
     "create_session",
     "AgentSession",
@@ -21,8 +47,14 @@ __all__ = [
     "list_tools",
     "memory_summary",
     "memory_search",
+    "memory_facts",
+    "memory_fact_history",
+    "memory_forget",
+    "memory_quarantine",
     "list_skills",
+    "skill_detail",
     "list_models",
+    "model_info",
     "WhisperSTT",
     "PiperTTS",
 ]
@@ -157,6 +189,8 @@ def create_session(model_id: Optional[str] = None) -> AgentSession:
     from src.prompts import build_system_prompt
     import src.memory as memory
 
+    _ensure_skills_and_mcp_discovered()
+
     resolved_model_id = model_id or get_default_model() or DEFAULT_MODEL
     session = Session(resolved_model_id)
 
@@ -222,6 +256,49 @@ def memory_search(query: str) -> list[dict]:
     ]
 
 
+def memory_facts() -> dict[str, str]:
+    """Current facts about the user, key -> value - mirrors the "Facts about
+    you" section of /memory's no-argument output."""
+    import src.memory as memory
+
+    return memory.mem.facts()
+
+
+def memory_fact_history(key: str) -> list[dict]:
+    """Version history for one fact key - mirrors /memory facts <key>'s
+    output (src/cli/commands.py's cmd_memory, "facts" subcommand) as a list
+    of {"value", "valid_from", "status"} ("active" | "invalidated" |
+    "archived"), newest revision last."""
+    import src.memory as memory
+
+    history = memory.mem.fact_history(key)
+    return [
+        {
+            "value": fact.value,
+            "valid_from": fact.valid_from,
+            "status": "archived" if fact.archived else ("invalidated" if fact.invalidated_at else "active"),
+        }
+        for fact in history
+    ]
+
+
+def memory_forget(key: str) -> bool:
+    """Tombstones a fact key (non-destructive) - mirrors /memory forget <key>.
+    Returns whether a fact with that key was found."""
+    import src.memory as memory
+
+    return memory.mem.forget(key)
+
+
+def memory_quarantine(n: int = 20) -> list[dict]:
+    """Recently rejected/quarantined auto-extractions - mirrors
+    /memory quarantine's output as a list of
+    {"ts", "key", "value", "reason", "source"}."""
+    import src.memory as memory
+
+    return memory.mem.quarantine_entries(n)
+
+
 def list_skills() -> list[dict]:
     """Installed skills - mirrors /skills' output
     (src/cli/commands.py's cmd_skills) as a list of {"name", "description"}."""
@@ -233,12 +310,43 @@ def list_skills() -> list[dict]:
     ]
 
 
+def skill_detail(name: str) -> dict:
+    """One skill's full detail - mirrors list_skills() but also reports
+    whether the skill ships its own tools.py or mcp.json, since /skills'
+    plain listing doesn't distinguish a pure-guidance skill from one that
+    extends the tool/MCP surface. Raises ValueError if `name` isn't
+    installed."""
+    import os
+    from src.skills.loader import list_skills as _list_skills
+
+    skills = _list_skills()
+    if name not in skills:
+        raise ValueError(f"Unknown skill: {name}")
+    info = skills[name]
+    return {
+        "name": name,
+        "description": info["description"],
+        "has_tools": os.path.isfile(os.path.join(info["path"], "tools.py")),
+        "has_mcp": os.path.isfile(os.path.join(info["path"], "mcp.json")),
+    }
+
+
 def list_models() -> list[dict]:
     """All available model cards (local + API) - mirrors /models' listing
     (src/cli/commands.py's cmd_models, no-argument branch)."""
     from src.models.registry import registry as model_registry
 
     return [model_registry.get(mid) for mid in model_registry.list_ids()]
+
+
+def model_info(model_id: str) -> dict:
+    """One model's full card - mirrors /models info <id>'s output
+    (src/cli/commands.py's cmd_models, "info" branch), including rate
+    limits for API-provider models. Raises ValueError if `model_id` isn't
+    registered."""
+    from src.models.registry import registry as model_registry
+
+    return model_registry.get(model_id)
 
 
 class WhisperSTT:

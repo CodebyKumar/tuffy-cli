@@ -20,22 +20,28 @@ from src.cli.commands import handle_command
 from src.cli.turn import run_turn
 from src.cli.display import print_logo, print_session_info, C_DIM, C_USER, C_RESET
 
-# Scans ./.tuffy/skills/*/ and auto-imports each skill's tools.py before the
-# first system prompt is built, so skill descriptions and skill-provided
-# tools are both present from the very first turn.
-discover_skills()
-
-# Connects to any MCP servers configured in ./.tuffy/mcp.json (gitignored —
-# see docs/configure-mcp.md) plus each loaded skill's own mcp.json, if any. A
-# no-op when no servers are configured. Must run after discover_skills() (so
-# skills' mcp.json files are known) and before the first system prompt is
-# built, so MCP tools appear in TOOLS YOU CAN CALL from turn one.
-connect_mcp_servers(extra_configs=mcp_configs_from_skills())
-
 
 def main():
     print_logo()
-    
+
+    # Scans ./.tuffy/skills/*/ and auto-imports each skill's tools.py before
+    # the first system prompt is built, so skill descriptions and
+    # skill-provided tools are both present from the very first turn.
+    # Placed here (after the banner, before model loading) rather than at
+    # module import time so its own printed output ("[mcp] Connected to
+    # ...") reads as part of the same startup summary block as the model
+    # load/ready lines just below it, instead of appearing above the banner
+    # before Tuffy has even announced itself.
+    discover_skills()
+
+    # Connects to any MCP servers configured in ./.tuffy/mcp.json (gitignored
+    # — see docs/configure-mcp.md) plus each loaded skill's own mcp.json, if
+    # any. A no-op when no servers are configured. Must run after
+    # discover_skills() (so skills' mcp.json files are known) and before the
+    # first system prompt is built, so MCP tools appear in TOOLS YOU CAN
+    # CALL from turn one.
+    connect_mcp_servers(extra_configs=mcp_configs_from_skills())
+
     import sys
     voice_mode = False
     if "--voice" in sys.argv:
